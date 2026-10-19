@@ -180,7 +180,7 @@ impl MppError {
     /// Returns whether the operation may succeed later.
     ///
     /// A 401 is transient in the sense that it succeeds after the token is
-    /// renewed, but the orchestrator should use a long backoff for it.
+    /// renewed; the service retries it with the shared backoff.
     pub fn is_transient(&self) -> bool {
         match self {
             Self::Network(_) | Self::Unauthorized => true,

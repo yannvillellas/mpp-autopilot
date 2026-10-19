@@ -24,6 +24,13 @@ pub enum Mode {
     Write,
 }
 
+impl Mode {
+    /// Maps the `WRITE` configuration flag to a persisted mode.
+    pub fn from_write(write: bool) -> Self {
+        if write { Self::Write } else { Self::Dry }
+    }
+}
+
 /// Per-match trigger that may run once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Trigger {
@@ -249,6 +256,12 @@ mod tests {
         state.record_trigger(Trigger::Publish, at(19, 7));
         state.record_write(Score { home: 1, away: 1 }, at(19, 7));
         state
+    }
+
+    #[test]
+    fn write_flag_maps_to_mode() {
+        assert_eq!(Mode::from_write(true), Mode::Write);
+        assert_eq!(Mode::from_write(false), Mode::Dry);
     }
 
     #[test]
