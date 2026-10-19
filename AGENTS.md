@@ -25,6 +25,13 @@ runs on a server with Docker. `README.md` gives the project overview.
 - Smallest possible visibility (`pub(crate)` by default).
 - Document modules (`//!`) and public items (`///`).
 
+## Git workflow
+
+- One feature per branch: `feat/<short-name>`, created from `main`.
+- Never work directly on `main` for a feature; initialization and
+  documentation are the only exceptions.
+- Features land through a pull request.
+
 ## Current requirements
 
 - Current scope: Ligue 1. Other competitions may come later.
