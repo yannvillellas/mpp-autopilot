@@ -1,0 +1,22 @@
+services:
+  mpp:
+    build: .
+    image: mpp:latest
+    container_name: mpp
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      WRITE: ${WRITE:-false}
+      DAILY_HOUR: ${DAILY_HOUR:-7}
+      STATE_PATH: /data/state.json
+    volumes:
+      - mpp-state:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  mpp-state:
