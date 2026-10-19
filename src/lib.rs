@@ -6,6 +6,7 @@ pub mod config;
 pub mod elo;
 pub mod model;
 pub mod mpp;
+pub mod run;
 pub mod scheduler;
 pub mod state;
 pub mod teams;
