@@ -1,0 +1,34 @@
+# Agent notes
+
+`mpp` is a Rust service that predicts Ligue 1 scores for Mon Petit Prono and
+runs on a server with Docker. `README.md` gives the project overview.
+
+## Before finishing a change
+
+- [ ] `cargo fmt`
+- [ ] `cargo clippy --all-targets -- -D warnings`
+- [ ] `cargo test`
+- [ ] No secret in code, logs or commits
+- [ ] `docker compose build` still succeeds
+
+## Conventions
+
+- Rust 2024 (MSRV 1.85), idiomatic code, small modules.
+- No `unwrap()` on external data (API, env, files); use `?` for fallible
+  operations.
+- `expect("reason")` is fine when failure would be a programmer error
+  (hardcoded values, invariants); `unwrap`/`expect` are fine in tests.
+- Avoid `panic!` on reachable runtime paths.
+- Typed errors with `thiserror` in modules, `anyhow` in `main`.
+- `tracing` for logs; no `println!` outside CLI output.
+- Keep network access isolated in `src/mpp.rs` and `src/elo.rs`.
+- Smallest possible visibility (`pub(crate)` by default).
+- Document modules (`//!`) and public items (`///`).
+
+## Current requirements
+
+- Current scope: Ligue 1. Other competitions may come later.
+- One MPP fetch per day; do not poll.
+- `WRITE=false` by default; writing is opt-in.
+- State is persisted atomically; never submit twice for the same trigger.
+- Docker Compose is the deployment target.
