@@ -4,6 +4,7 @@
 
 pub mod config;
 pub mod model;
+pub mod mpp;
 pub mod scheduler;
 pub mod state;
 pub mod teams;
