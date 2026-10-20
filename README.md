@@ -4,16 +4,17 @@ Autonomous Ligue 1 predictions for [Mon Petit Prono](https://mpp.football),
 powered by [ClubElo](https://clubelo.com).
 
 `mpp` reads the day's fixtures and quotations once, computes the exact score
-that maximizes expected points, and submits it for you one hour and five
-minutes before kickoff.
+that maximizes expected points, and submits it when the match is first seen,
+one hour before kickoff, and five minutes before kickoff.
 
 ## Features
 
-- One MPP request per day; ClubElo is refreshed at each trigger.
+- One MPP snapshot per day (two GETs); ClubElo is refreshed at each trigger.
 - Elo-driven Poisson model with a Dixon-Coles correction.
 - Expected-value pick based on the MPP quotations.
 - Dry-run by default; writing is opt-in.
-- Persistent state, so restarts never duplicate a submission.
+- Persistent state prevents completed triggers from being replayed across
+  restarts.
 - Single Rust binary, Docker-ready.
 
 ## Quick start
@@ -29,7 +30,19 @@ With Docker:
 ```bash
 docker compose up -d --build
 docker compose logs -f
+docker compose run --rm mpp check
 ```
+
+The runtime image is distroless: there is no shell inside the container.
+Use `docker compose logs`, `docker compose run --rm mpp check`, or a
+temporary debug container. A dry-run smoke test is:
+
+```bash
+WRITE=false docker compose run --rm mpp once
+```
+
+`once` shares `STATE_PATH` with the service. Stop the service or use a
+separate state path/volume before running it against a live deployment.
 
 ## Configuration
 
@@ -39,7 +52,7 @@ docker compose logs -f
 | `WRITE`      | `false`        | Set to `true` to submit predictions.         |
 | `DAILY_HOUR` | `7`            | Hour of the daily MPP fetch (Europe/Paris).  |
 | `STATE_PATH` | `./state.json` | State file (Docker uses `/data/state.json`). |
-| `LOG_LEVEL`  | `INFO`         | Optional log level.                          |
+| `LOG_LEVEL`  | `INFO`         | `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`.   |
 
 `WRITE=false` runs the whole pipeline — fetch, model, logs — without submitting
 anything. Keep it for the first deployment and while testing changes.
@@ -75,3 +88,5 @@ cargo test
 
 - The MPP API is private and undocumented; endpoints may change without notice.
 - Automated submissions may violate MPP's terms of service. Use at your own risk.
+- A crash between a successful PATCH and the state write is the residual
+  duplicate-submission window; reading forecasts back is out of scope.
