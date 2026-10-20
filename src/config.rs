@@ -34,7 +34,7 @@ pub struct Config {
     pub daily_hour: u8,
     /// JSON state file.
     pub state_path: PathBuf,
-    /// Tracing filter directive.
+    /// Log level: TRACE, DEBUG, INFO, WARN or ERROR.
     pub log_level: String,
 }
 

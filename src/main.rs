@@ -1,6 +1,7 @@
 //! CLI entrypoint and process wiring.
 
 use std::io::IsTerminal;
+use std::path::Path;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
@@ -12,8 +13,8 @@ use mpp::elo::ClubEloClient;
 use mpp::mpp::{MppApi, MppClient};
 use mpp::service;
 use mpp::state::{Mode, State};
-use tracing::{info, warn};
-use tracing_subscriber::EnvFilter;
+use tracing::{Level, info, warn};
+use tracing_subscriber::filter::LevelFilter;
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -52,14 +53,24 @@ async fn run_command(command: Command) -> Result<()> {
 }
 
 fn init_tracing(level: &str) -> Result<()> {
-    let filter =
-        EnvFilter::try_new(level).with_context(|| format!("invalid LOG_LEVEL {level:?}"))?;
+    let level = parse_log_level(level)?;
     tracing_subscriber::fmt()
-        .with_env_filter(filter)
+        .with_max_level(LevelFilter::from(level))
         .with_ansi(std::io::stdout().is_terminal())
         .try_init()
         .map_err(|error| anyhow::anyhow!("failed to initialize tracing: {error}"))?;
     Ok(())
+}
+
+fn parse_log_level(level: &str) -> Result<Level> {
+    match level.to_ascii_uppercase().as_str() {
+        "TRACE" => Ok(Level::TRACE),
+        "DEBUG" => Ok(Level::DEBUG),
+        "INFO" => Ok(Level::INFO),
+        "WARN" => Ok(Level::WARN),
+        "ERROR" => Ok(Level::ERROR),
+        _ => bail!("invalid LOG_LEVEL {level:?}; expected TRACE, DEBUG, INFO, WARN or ERROR"),
+    }
 }
 
 fn log_startup(config: &Config) -> Result<()> {
@@ -91,6 +102,8 @@ fn check(config: &Config, mode: Mode) -> Result<()> {
         }
     }
 
+    probe_state_directory(&config.state_path)?;
+
     let state = State::load(&config.state_path, mode)
         .with_context(|| format!("failed to load state {}", config.state_path.display()))?;
 
@@ -100,6 +113,31 @@ fn check(config: &Config, mode: Mode) -> Result<()> {
         mode,
         config.state_path.display()
     );
+    Ok(())
+}
+
+fn probe_state_directory(state_path: &Path) -> Result<()> {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let probe = state_path.with_file_name(format!(".mpp-check-{}-{nonce}", std::process::id()));
+
+    let result = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, b"ok"));
+
+    if let Err(error) = result {
+        let _ = std::fs::remove_file(&probe);
+        return Err(error)
+            .with_context(|| format!("state directory is not writable: {}", probe.display()));
+    }
+
+    if let Err(error) = std::fs::remove_file(&probe) {
+        warn!("failed to remove state probe {}: {error}", probe.display());
+    }
     Ok(())
 }
 
@@ -183,4 +221,69 @@ async fn run_service(config: &Config, mode: Mode) -> Result<()> {
     .await
     .context("service loop failed")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    static NEXT_DIR: AtomicUsize = AtomicUsize::new(0);
+
+    fn temp_dir() -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "mpp-main-{}-{}",
+            std::process::id(),
+            NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&path).expect("create temp dir");
+        path
+    }
+
+    #[test]
+    fn log_level_accepts_standard_levels() {
+        assert_eq!(parse_log_level("TRACE").expect("trace"), Level::TRACE);
+        assert_eq!(parse_log_level("debug").expect("debug"), Level::DEBUG);
+        assert_eq!(parse_log_level("Info").expect("info"), Level::INFO);
+        assert_eq!(parse_log_level("warn").expect("warn"), Level::WARN);
+        assert_eq!(parse_log_level("ERROR").expect("error"), Level::ERROR);
+    }
+
+    #[test]
+    fn log_level_rejects_unknown_values() {
+        assert!(parse_log_level("verbose").is_err());
+        assert!(parse_log_level("mpp=debug").is_err());
+        assert!(parse_log_level("1").is_err());
+        assert!(parse_log_level("5").is_err());
+    }
+
+    #[test]
+    fn state_probe_writes_and_cleans_up() {
+        let dir = temp_dir();
+        let state_path = dir.join("state.json");
+
+        probe_state_directory(&state_path).expect("writable state directory");
+
+        assert!(!state_path.exists());
+        assert!(
+            std::fs::read_dir(&dir)
+                .expect("read temp dir")
+                .next()
+                .is_none()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn state_probe_rejects_unwritable_location() {
+        let dir = temp_dir();
+        let file = dir.join("not-a-directory");
+        std::fs::write(&file, b"x").expect("write file");
+
+        assert!(probe_state_directory(&file.join("state.json")).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

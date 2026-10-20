@@ -29,6 +29,15 @@ With Docker:
 ```bash
 docker compose up -d --build
 docker compose logs -f
+docker compose run --rm mpp check
+```
+
+The runtime image is distroless: there is no shell inside the container.
+Use `docker compose logs`, `docker compose run --rm mpp check`, or a
+temporary debug container. A dry-run smoke test is:
+
+```bash
+WRITE=false docker compose run --rm mpp once
 ```
 
 ## Configuration
@@ -39,7 +48,7 @@ docker compose logs -f
 | `WRITE`      | `false`        | Set to `true` to submit predictions.         |
 | `DAILY_HOUR` | `7`            | Hour of the daily MPP fetch (Europe/Paris).  |
 | `STATE_PATH` | `./state.json` | State file (Docker uses `/data/state.json`). |
-| `LOG_LEVEL`  | `INFO`         | Optional log level.                          |
+| `LOG_LEVEL`  | `INFO`         | `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`.   |
 
 `WRITE=false` runs the whole pipeline — fetch, model, logs — without submitting
 anything. Keep it for the first deployment and while testing changes.
