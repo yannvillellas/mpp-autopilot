@@ -115,6 +115,11 @@ impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E> {
         &self.state
     }
 
+    /// Returns whether a daily snapshot has been loaded.
+    pub fn has_snapshot(&self) -> bool {
+        self.snapshot_loaded
+    }
+
     /// Fetches the daily MPP snapshot, updates the state and persists it.
     pub async fn daily_pass(&mut self, now: DateTime<Utc>) -> Result<RunReport, RunError> {
         let Snapshot { matches, .. } = self.mpp.fetch_snapshot().await?;
@@ -146,8 +151,8 @@ impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E> {
         }
 
         self.fixtures = fixtures;
-        self.snapshot_loaded = true;
         self.state.save(&self.state_path)?;
+        self.snapshot_loaded = true;
         info!(matches = count, "daily MPP fetch complete");
 
         Ok(RunReport {

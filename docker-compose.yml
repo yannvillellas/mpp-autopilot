@@ -4,6 +4,7 @@ services:
     image: mpp:latest
     container_name: mpp
     restart: unless-stopped
+    stop_grace_period: 90s
     env_file:
       - .env
     environment:
