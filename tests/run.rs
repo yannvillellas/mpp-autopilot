@@ -44,7 +44,7 @@ impl Drop for TestDir {
 struct FakeMpp {
     snapshot: Snapshot,
     writes: Mutex<Vec<(String, Score)>>,
-    fail_status: Mutex<Option<StatusCode>>,
+    fail_status: Mutex<Option<(Option<String>, StatusCode)>>,
 }
 
 impl FakeMpp {
@@ -57,7 +57,12 @@ impl FakeMpp {
     }
 
     fn fail_writes(&self, status: StatusCode) {
-        *self.fail_status.lock().expect("fail status lock") = Some(status);
+        *self.fail_status.lock().expect("fail status lock") = Some((None, status));
+    }
+
+    fn fail_writes_for(&self, match_id: &str, status: StatusCode) {
+        *self.fail_status.lock().expect("fail status lock") =
+            Some((Some(match_id.to_owned()), status));
     }
 
     fn writes(&self) -> Vec<(String, Score)> {
@@ -71,12 +76,16 @@ impl MppApi for FakeMpp {
     }
 
     async fn submit_forecast(&self, match_id: &str, score: Score) -> Result<(), MppError> {
-        if let Some(status) = *self.fail_status.lock().expect("fail status lock") {
-            return Err(MppError::Status {
-                status,
-                body: "forced write failure".to_owned(),
-            });
+        let fail = self.fail_status.lock().expect("fail status lock");
+        if let Some((target, status)) = fail.as_ref() {
+            if target.as_deref().is_none_or(|target| target == match_id) {
+                return Err(MppError::Status {
+                    status: *status,
+                    body: "forced write failure".to_owned(),
+                });
+            }
         }
+        drop(fail);
 
         self.writes
             .lock()
@@ -419,7 +428,7 @@ async fn permanent_write_failure_marks_the_trigger() {
 }
 
 #[tokio::test]
-async fn missing_fixture_leaves_the_trigger_pending() {
+async fn missing_fixture_is_skipped_without_blocking() {
     let mpp = FakeMpp::new(Snapshot {
         clubs: HashMap::new(),
         matches: Vec::new(),
@@ -435,16 +444,76 @@ async fn missing_fixture_leaves_the_trigger_pending() {
         path,
     );
 
+    let report = runner.execute_once(now()).await.expect("execute once");
+
+    assert_eq!(report.matches, 0);
+    assert_eq!(report.triggers, 1);
+    assert_eq!(report.skipped, 1);
+    assert_eq!(report.writes, 0);
+    assert_eq!(elo.calls(), 0);
+    assert!(runner.state().matches["match-1"].is_trigger_done(Trigger::Publish));
+    assert!(mpp.writes().is_empty());
+}
+
+#[tokio::test]
+async fn missing_fixture_does_not_block_other_matches() {
+    let mpp = FakeMpp::new(snapshot(kickoff()));
+    let elo = FakeElo::new(ratings());
+    let dir = TestDir::new();
+    let path = dir.path().join("state.json");
+
+    let mut state = state_with_match(Mode::Write, kickoff());
+    state
+        .matches
+        .insert("stale-match".to_owned(), MatchState::new(kickoff()));
+    let mut runner = Orchestrator::new(&mpp, &elo, Mode::Write, state, path);
+
+    let report = runner.execute_once(now()).await.expect("execute once");
+
+    assert_eq!(report.matches, 1);
+    assert_eq!(report.triggers, 2);
+    assert_eq!(report.writes, 1);
+    assert_eq!(report.skipped, 1);
+    assert_eq!(elo.calls(), 1);
+    assert_eq!(
+        mpp.writes(),
+        vec![("match-1".to_owned(), Score { home: 1, away: 1 })]
+    );
+    assert!(runner.state().matches["match-1"].is_trigger_done(Trigger::Publish));
+    assert!(runner.state().matches["stale-match"].is_trigger_done(Trigger::Publish));
+}
+
+#[tokio::test]
+async fn transient_write_failure_does_not_block_other_matches() {
+    let mut snapshot = snapshot(kickoff());
+    let mut second = fixture(kickoff());
+    second.id = "match-2".to_owned();
+    snapshot.matches.push(second);
+
+    let mpp = FakeMpp::new(snapshot);
+    mpp.fail_writes_for("match-1", StatusCode::INTERNAL_SERVER_ERROR);
+    let elo = FakeElo::new(ratings());
+    let dir = TestDir::new();
+    let path = dir.path().join("state.json");
+
+    let mut state = state_with_match(Mode::Write, kickoff());
+    state
+        .matches
+        .insert("match-2".to_owned(), MatchState::new(kickoff()));
+    let mut runner = Orchestrator::new(&mpp, &elo, Mode::Write, state, path);
+
     let error = runner
         .execute_once(now())
         .await
-        .expect_err("missing fixture");
+        .expect_err("transient failure");
 
-    assert!(matches!(error, RunError::MissingFixture(_)));
-    assert!(error.is_transient());
-    assert_eq!(elo.calls(), 0);
+    assert!(matches!(error, RunError::Mpp(_)));
+    assert_eq!(
+        mpp.writes(),
+        vec![("match-2".to_owned(), Score { home: 1, away: 1 })]
+    );
     assert!(!runner.state().matches["match-1"].is_trigger_done(Trigger::Publish));
-    assert!(mpp.writes().is_empty());
+    assert!(runner.state().matches["match-2"].is_trigger_done(Trigger::Publish));
 }
 
 #[tokio::test]

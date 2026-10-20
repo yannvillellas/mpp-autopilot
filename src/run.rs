@@ -63,9 +63,6 @@ pub enum RunError {
     /// A trigger pass ran before any daily snapshot was loaded.
     #[error("daily snapshot required before a trigger pass")]
     MissingSnapshot,
-    /// A pending future match is absent from the latest daily snapshot.
-    #[error("match {0} is missing from the daily snapshot")]
-    MissingFixture(String),
 }
 
 impl RunError {
@@ -75,7 +72,6 @@ impl RunError {
             Self::Mpp(error) => error.is_transient(),
             Self::Elo(error) => error.is_transient(),
             Self::State(_) | Self::MissingSnapshot => false,
-            Self::MissingFixture(_) => true,
         }
     }
 }
@@ -210,28 +206,31 @@ impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E> {
             return Ok(report);
         }
 
-        if let Some((match_id, trigger)) = future
-            .iter()
-            .find(|(match_id, _)| !self.fixtures.contains_key(match_id))
-        {
-            warn!(
-                match_id = %match_id,
-                trigger = ?trigger,
-                kickoff = %self.state.matches[match_id].kickoff,
-                "fixture missing from daily snapshot; trigger left pending"
-            );
-            return Err(RunError::MissingFixture(match_id.clone()));
+        let mut ready = Vec::with_capacity(future.len());
+        for (match_id, trigger) in future {
+            let Some(fixture) = self.fixtures.get(&match_id).cloned() else {
+                warn!(
+                    match_id = %match_id,
+                    trigger = ?trigger,
+                    kickoff = %self.state.matches[&match_id].kickoff,
+                    "fixture missing from daily snapshot; trigger marked without write"
+                );
+                self.mark_trigger(&match_id, trigger, now)?;
+                report.triggers += 1;
+                report.skipped += 1;
+                continue;
+            };
+            ready.push((match_id, trigger, fixture));
+        }
+
+        if ready.is_empty() {
+            return Ok(report);
         }
 
         let ratings = self.elo.fetch_ratings().await?;
+        let mut first_error: Option<RunError> = None;
 
-        for (match_id, trigger) in future {
-            let fixture = self
-                .fixtures
-                .get(&match_id)
-                .cloned()
-                .expect("fixtures are pre-checked before future triggers");
-
+        for (match_id, trigger, fixture) in ready {
             let Some(home_canonical) = teams::canonical_name(&fixture.home.name) else {
                 warn!(
                     match_id = %match_id,
@@ -360,7 +359,16 @@ impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E> {
                         error = %error,
                         "transient MPP write failure; trigger left pending"
                     );
-                    return Err(error.into());
+                    match error {
+                        MppError::Network(_) | MppError::Unauthorized => {
+                            return Err(error.into());
+                        }
+                        other => {
+                            if first_error.is_none() {
+                                first_error = Some(other.into());
+                            }
+                        }
+                    }
                 }
                 Err(error) => {
                     log_trigger(
@@ -382,6 +390,10 @@ impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E> {
                     report.skipped += 1;
                 }
             }
+        }
+
+        if let Some(error) = first_error {
+            return Err(error);
         }
 
         Ok(report)
