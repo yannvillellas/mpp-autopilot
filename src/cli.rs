@@ -36,11 +36,11 @@ pub enum CliError {
 }
 
 /// Short usage line.
-pub const USAGE: &str = "Usage: mpp [once|list|check]";
+pub const USAGE: &str = "Usage: mpp-autopilot [once|list|check]";
 
 /// Full help text.
 pub const HELP: &str = "\
-Usage: mpp [COMMAND]
+Usage: mpp-autopilot [COMMAND]
 
 Commands:
   once    Run one daily fetch and the due triggers, then exit

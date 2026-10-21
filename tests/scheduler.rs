@@ -3,11 +3,11 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
-use mpp::scheduler::{
+use mpp_autopilot::scheduler::{
     SchedulerError, daily_due, due_triggers, next_daily, next_trigger_wake, next_wake,
     trigger_due_at,
 };
-use mpp::state::{MatchState, Trigger};
+use mpp_autopilot::state::{MatchState, Trigger};
 
 fn utc(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> DateTime<Utc> {
     Utc.with_ymd_and_hms(year, month, day, hour, minute, 0)

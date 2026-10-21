@@ -9,17 +9,17 @@ RUN apt-get update \
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 
-RUN cargo build --release --locked --bin mpp \
+RUN cargo build --release --locked --bin mpp-autopilot \
     && mkdir -p /build/data \
     && chown 999:999 /build/data
 
 FROM gcr.io/distroless/cc-debian12:nonroot
 
-COPY --from=builder /build/target/release/mpp /usr/local/bin/mpp
+COPY --from=builder /build/target/release/mpp-autopilot /usr/local/bin/mpp-autopilot
 COPY --from=builder --chown=999:999 /build/data /data
 
 ENV STATE_PATH=/data/state.json
 WORKDIR /data
 USER 999:999
 VOLUME ["/data"]
-ENTRYPOINT ["/usr/local/bin/mpp"]
+ENTRYPOINT ["/usr/local/bin/mpp-autopilot"]

@@ -1,6 +1,6 @@
 //! Club-name normalization and provider aliases.
 
-use mpp::teams::{CANONICAL_CLUBS, canonical_name, clubelo_name, normalize_name};
+use mpp_autopilot::teams::{CANONICAL_CLUBS, canonical_name, clubelo_name, normalize_name};
 
 #[test]
 fn mpp_variants_map_to_canonical_names() {

@@ -7,12 +7,12 @@ use std::process::ExitCode;
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use chrono_tz::Europe::Paris;
-use mpp::cli::{self, Action, Command};
-use mpp::config::{self, Config};
-use mpp::elo::ClubEloClient;
-use mpp::mpp::{MppApi, MppClient};
-use mpp::service;
-use mpp::state::{Mode, State};
+use mpp_autopilot::cli::{self, Action, Command};
+use mpp_autopilot::config::{self, Config};
+use mpp_autopilot::elo::ClubEloClient;
+use mpp_autopilot::mpp::{MppApi, MppClient};
+use mpp_autopilot::service;
+use mpp_autopilot::state::{Mode, State};
 use tracing::{Level, info, warn};
 use tracing_subscriber::filter::LevelFilter;
 
@@ -121,7 +121,10 @@ fn probe_state_directory(state_path: &Path) -> Result<()> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
-    let probe = state_path.with_file_name(format!(".mpp-check-{}-{nonce}", std::process::id()));
+    let probe = state_path.with_file_name(format!(
+        ".mpp-autopilot-check-{}-{nonce}",
+        std::process::id()
+    ));
 
     let result = std::fs::OpenOptions::new()
         .write(true)
@@ -234,7 +237,7 @@ mod tests {
 
     fn temp_dir() -> PathBuf {
         let path = std::env::temp_dir().join(format!(
-            "mpp-main-{}-{}",
+            "mpp-autopilot-main-{}-{}",
             std::process::id(),
             NEXT_DIR.fetch_add(1, Ordering::Relaxed)
         ));
