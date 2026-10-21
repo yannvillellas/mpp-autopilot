@@ -1,11 +1,12 @@
-# mpp
+# MPP Autopilot
 
-Autonomous Ligue 1 predictions for [Mon Petit Prono](https://mpp.football),
-powered by [ClubElo](https://clubelo.com).
+MPP Autopilot is an autonomous Ligue 1 prediction bot for
+[MPP (Mon Petit Prono)](https://mpp.football), powered by
+[ClubElo](https://clubelo.com).
 
-`mpp` reads the day's fixtures and quotations once, computes the exact score
-that maximizes expected points, and submits it when the match is first seen,
-one hour before kickoff, and five minutes before kickoff.
+The bot reads the day's MPP fixtures and quotations once, computes the exact
+score that maximizes expected points, and submits it when the match is first
+seen, one hour before kickoff, and five minutes before kickoff.
 
 ## Features
 
@@ -30,15 +31,15 @@ With Docker:
 ```bash
 docker compose up -d --build
 docker compose logs -f
-docker compose run --rm mpp check
+docker compose run --rm mpp-autopilot check
 ```
 
 The runtime image is distroless: there is no shell inside the container.
-Use `docker compose logs`, `docker compose run --rm mpp check`, or a
+Use `docker compose logs`, `docker compose run --rm mpp-autopilot check`, or a
 temporary debug container. A dry-run smoke test is:
 
 ```bash
-WRITE=false docker compose run --rm mpp once
+WRITE=false docker compose run --rm mpp-autopilot once
 ```
 
 `once` shares `STATE_PATH` with the service. Stop the service or use a
@@ -48,23 +49,26 @@ separate state path/volume before running it against a live deployment.
 
 | Variable     | Default        | Description                                  |
 | ------------ | -------------- | -------------------------------------------- |
-| `MPP_TOKEN`  | —              | Auth0 access token for the MPP API.          |
+| `MPP_TOKEN`  | —              | Auth0 token for the MPP app API.             |
 | `WRITE`      | `false`        | Set to `true` to submit predictions.         |
 | `DAILY_HOUR` | `7`            | Hour of the daily MPP fetch (Europe/Paris).  |
 | `STATE_PATH` | `./state.json` | State file (Docker uses `/data/state.json`). |
 | `LOG_LEVEL`  | `INFO`         | `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`.   |
+
+`MPP_TOKEN` authenticates MPP Autopilot against the MPP app. The other variables
+configure the bot itself.
 
 `WRITE=false` runs the whole pipeline — fetch, model, logs — without submitting
 anything. Keep it for the first deployment and while testing changes.
 
 ## CLI
 
-| Command     | Description                                      |
-| ----------- | ------------------------------------------------ |
-| `mpp`       | Run continuously.                                |
-| `mpp once`  | One daily fetch and the due triggers, then exit. |
-| `mpp list`  | Print the Ligue 1 fixtures and quotations.       |
-| `mpp check` | Validate the configuration and exit.             |
+| Command               | Description                                      |
+| --------------------- | ------------------------------------------------ |
+| `mpp-autopilot`       | Run continuously.                                |
+| `mpp-autopilot once`  | One daily fetch and the due triggers, then exit. |
+| `mpp-autopilot list`  | Print the Ligue 1 fixtures and quotations.       |
+| `mpp-autopilot check` | Validate the configuration and exit.             |
 
 ## How it works
 

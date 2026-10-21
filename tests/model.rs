@@ -1,6 +1,6 @@
 //! Reference-case and invariants for the expected-points model.
 
-use mpp::model::{Odds, Outcome, Score, lambdas, predict};
+use mpp_autopilot::model::{Odds, Outcome, Score, lambdas, predict};
 
 const TOLERANCE: f64 = 5e-4;
 

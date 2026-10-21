@@ -1,9 +1,9 @@
 [package]
-name = "mpp"
+name = "mpp-autopilot"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
-description = "Autonomous Ligue 1 predictions for Mon Petit Prono"
+description = "MPP Autopilot: autonomous Ligue 1 predictions for Mon Petit Prono"
 publish = false
 
 [dependencies]

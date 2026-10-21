@@ -222,7 +222,7 @@ mod tests {
     impl TestDir {
         fn new() -> Self {
             let path = std::env::temp_dir().join(format!(
-                "mpp-state-{}-{}",
+                "mpp-autopilot-state-{}-{}",
                 std::process::id(),
                 NEXT_DIR.fetch_add(1, Ordering::Relaxed)
             ));

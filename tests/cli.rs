@@ -1,6 +1,6 @@
 //! CLI parsing tests.
 
-use mpp::cli::{Action, CliError, Command, parse_args};
+use mpp_autopilot::cli::{Action, CliError, Command, parse_args};
 
 fn args(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).to_owned()).collect()
@@ -54,21 +54,21 @@ fn extra_arguments_are_rejected() {
 
 #[test]
 fn binary_help_exits_zero() {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_mpp"))
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_mpp-autopilot"))
         .arg("--help")
         .output()
-        .expect("run mpp");
+        .expect("run mpp-autopilot");
 
     assert_eq!(output.status.code(), Some(0));
-    assert!(String::from_utf8_lossy(&output.stdout).contains("Usage: mpp"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Usage: mpp-autopilot"));
 }
 
 #[test]
 fn binary_unknown_argument_exits_two() {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_mpp"))
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_mpp-autopilot"))
         .arg("unknown")
         .output()
-        .expect("run mpp");
+        .expect("run mpp-autopilot");
 
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("unknown argument"));

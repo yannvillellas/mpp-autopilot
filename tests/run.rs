@@ -6,11 +6,11 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
-use mpp::elo::{EloError, EloRatings, EloSite};
-use mpp::model::{Odds, Score};
-use mpp::mpp::{Club, Fixture, MppApi, MppError, Snapshot};
-use mpp::run::{Orchestrator, RunError};
-use mpp::state::{MatchState, Mode, State, Trigger};
+use mpp_autopilot::elo::{EloError, EloRatings, EloSite};
+use mpp_autopilot::model::{Odds, Score};
+use mpp_autopilot::mpp::{Club, Fixture, MppApi, MppError, Snapshot};
+use mpp_autopilot::run::{Orchestrator, RunError};
+use mpp_autopilot::state::{MatchState, Mode, State, Trigger};
 use reqwest::StatusCode;
 
 static NEXT_DIR: AtomicUsize = AtomicUsize::new(0);
@@ -22,7 +22,7 @@ struct TestDir {
 impl TestDir {
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!(
-            "mpp-run-{}-{}",
+            "mpp-autopilot-run-{}-{}",
             std::process::id(),
             NEXT_DIR.fetch_add(1, Ordering::Relaxed)
         ));

@@ -1,6 +1,7 @@
-//! Mon Petit Prono prediction bot.
+//! MPP Autopilot: automation for the MPP (Mon Petit Prono) app.
 //!
-//! The crate exposes the pure building blocks used by the `mpp` binary.
+//! The crate exposes the pure building blocks used by the `mpp-autopilot`
+//! binary.
 
 pub mod cli;
 pub mod config;

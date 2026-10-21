@@ -528,7 +528,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mpp"
+name = "mpp-autopilot"
 version = "0.1.0"
 dependencies = [
  "anyhow",
