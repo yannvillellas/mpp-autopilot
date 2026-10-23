@@ -211,7 +211,7 @@ async fn write_mode_writes_publish_and_persists() {
     let saved = &runner.state().matches["match-1"];
     assert!(saved.is_trigger_done(Trigger::Publish));
     assert_eq!(saved.written_score(), Some("1-1"));
-    assert_eq!(saved.written_at, Some(now()));
+    assert_eq!(saved.last_written_at, Some(now()));
     assert_eq!(elo.calls(), 1);
 
     let loaded = State::load(&path, Mode::Write).expect("load state");
@@ -243,7 +243,7 @@ async fn dry_run_marks_the_trigger_without_writing() {
     let saved = &runner.state().matches["match-1"];
     assert!(saved.is_trigger_done(Trigger::Publish));
     assert_eq!(saved.written_score(), None);
-    assert_eq!(saved.written_at, None);
+    assert_eq!(saved.last_written_at, None);
 }
 
 #[tokio::test]
