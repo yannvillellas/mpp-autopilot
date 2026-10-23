@@ -68,6 +68,13 @@ pub trait MppApi: Send + Sync {
 
     /// Submits an exact score for the `general` contest.
     async fn submit_forecast(&self, match_id: &str, score: Score) -> Result<(), MppError>;
+
+    /// Reads back the exact score registered for the `general` contest.
+    ///
+    /// Returns `None` when no forecast has been submitted for the match yet,
+    /// including when MPP answers `404`. This is the source of truth for
+    /// idempotence: the local state only records what the bot itself wrote.
+    async fn fetch_forecast(&self, match_id: &str) -> Result<Option<Score>, MppError>;
 }
 
 /// HTTP client for the private MPP API.
@@ -97,6 +104,7 @@ impl MppClient {
             .request(method, format!("{}{path}", self.base_url))
             .query(&[("application", APPLICATION)])
             .bearer_auth(&self.token)
+            .header("application", APPLICATION)
             .header("platform", "web")
             .header("client-language", "fr-FR")
             .header("accept", "application/json")
@@ -145,6 +153,32 @@ impl MppApi for MppClient {
 
         check_response(response).await?;
         Ok(())
+    }
+
+    async fn fetch_forecast(&self, match_id: &str) -> Result<Option<Score>, MppError> {
+        let path = format!("/user-match-forecasts/{match_id}");
+        let response = self
+            .request(Method::GET, &path)
+            .send()
+            .await
+            .map_err(MppError::Network)?;
+
+        // A 404 is *not* the documented "no forecast" answer: an unknown match
+        // id answers `200 {}` and a malformed one `400`, so a 404 here means a
+        // wrong route, scope or gateway. It is logged before falling back to
+        // writing, so a broken read route cannot disable idempotence silently.
+        if response.status() == StatusCode::NOT_FOUND {
+            warn!(
+                match_id = %match_id,
+                "MPP answered 404 to the forecast read; writing as if none were registered"
+            );
+            return Ok(None);
+        }
+
+        let response = check_response(response).await?;
+        let body = response.bytes().await.map_err(MppError::Network)?;
+        let value: Value = serde_json::from_slice(&body)?;
+        parse_forecast(&value)
     }
 }
 
@@ -343,6 +377,54 @@ fn parse_odds(quotations: Option<&Value>) -> Option<Odds> {
     (odds.home > 0.0 && odds.draw > 0.0 && odds.away > 0.0).then_some(odds)
 }
 
+/// Extracts the `general` forecast from a user-match-forecasts response.
+///
+/// Observed shapes (probed 2026-10-23): a registered forecast answers an
+/// object with `general`, an unknown match id answers `{}`, and a purged
+/// forecast answers `{ "general": null }`. All of those mean "nothing to
+/// compare", so the bot writes. An object carrying other keys but no
+/// `general` is a schema change and is reported as an invalid payload, so a
+/// wrong assumption about the private API shows up in the logs instead of
+/// silently disabling idempotence.
+fn parse_forecast(value: &Value) -> Result<Option<Score>, MppError> {
+    let Some(payload) = value.as_object() else {
+        return Err(MppError::InvalidPayload(
+            "user-match-forecasts payload must be an object",
+        ));
+    };
+
+    let Some(general) = payload.get("general") else {
+        return if payload.is_empty() {
+            Ok(None)
+        } else {
+            Err(MppError::InvalidPayload("missing general forecast"))
+        };
+    };
+    if general.is_null() {
+        return Ok(None);
+    }
+
+    let home = general
+        .get("homeScore")
+        .and_then(Value::as_u64)
+        .ok_or(MppError::InvalidPayload(
+            "general.homeScore must be an integer",
+        ))?;
+    let away = general
+        .get("awayScore")
+        .and_then(Value::as_u64)
+        .ok_or(MppError::InvalidPayload(
+            "general.awayScore must be an integer",
+        ))?;
+
+    let home = u8::try_from(home)
+        .map_err(|_| MppError::InvalidPayload("general.homeScore is out of range"))?;
+    let away = u8::try_from(away)
+        .map_err(|_| MppError::InvalidPayload("general.awayScore is out of range"))?;
+
+    Ok(Some(Score { home, away }))
+}
+
 fn forecast_body(score: Score) -> Value {
     json!({
         "homeScore": score.home,
@@ -511,6 +593,59 @@ mod tests {
         ));
         assert!(matches!(
             parse_matches(&json!([]), &HashMap::new()),
+            Err(MppError::InvalidPayload(_))
+        ));
+    }
+
+    #[test]
+    fn forecast_payloads_are_parsed() {
+        let forecast = json!({
+            "general": {
+                "homeScore": 0,
+                "awayScore": 1,
+                "editedAt": "2026-10-23T18:30:00.000Z",
+                "points": null
+            }
+        });
+        assert_eq!(
+            parse_forecast(&forecast).expect("parse forecast"),
+            Some(Score { home: 0, away: 1 })
+        );
+
+        assert_eq!(
+            parse_forecast(&json!({ "general": null })).expect("null general"),
+            None
+        );
+        // Observed for an unknown match id: an empty object, not a 404.
+        assert_eq!(parse_forecast(&json!({})).expect("empty payload"), None);
+    }
+
+    #[test]
+    fn unexpected_forecast_payloads_are_rejected() {
+        // An object carrying other entities but no `general`, an array or a
+        // bare value would otherwise read as "no forecast" and silently
+        // disable the idempotence check.
+        for payload in [
+            json!({ "mpp_challenge_X": { "homeScore": 1 } }),
+            json!([]),
+            json!("nope"),
+        ] {
+            assert!(
+                matches!(parse_forecast(&payload), Err(MppError::InvalidPayload(_))),
+                "unexpected payload should be rejected: {payload}"
+            );
+        }
+
+        assert!(matches!(
+            parse_forecast(&json!({ "general": { "points": 12 } })),
+            Err(MppError::InvalidPayload(_))
+        ));
+        assert!(matches!(
+            parse_forecast(&json!({ "general": { "homeScore": 1 } })),
+            Err(MppError::InvalidPayload(_))
+        ));
+        assert!(matches!(
+            parse_forecast(&json!({ "general": { "homeScore": 300, "awayScore": 1 } })),
             Err(MppError::InvalidPayload(_))
         ));
     }

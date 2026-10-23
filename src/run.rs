@@ -1,9 +1,13 @@
 //! Orchestration of the daily fetch, match triggers and MPP writes.
 //!
-//! State is saved immediately after each successful write. A crash between
-//! the PATCH and the state rename can cause a duplicate submission on
-//! restart; strict exactly-once would require reading forecasts back, which
-//! is out of scope.
+//! Idempotence reads the forecast back from MPP before every write: a trigger
+//! writes only when the remote score differs from the model pick, so a manual
+//! edit in the app is overwritten at the next trigger and a crash between the
+//! PATCH and the state write is corrected instead of replayed. When the
+//! forecast cannot be read, the trigger writes unconditionally: a wrong or
+//! missing score is worse than a redundant PATCH.
+//! The persistent state remains the scheduler memory: which triggers already
+//! ran, the kickoff of each match, and an audit trail of what the bot wrote.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -28,9 +32,11 @@ pub struct RunReport {
     pub triggers: usize,
     /// Predictions actually written to MPP.
     pub writes: usize,
-    /// Triggers skipped because the score was already written.
+    /// Triggers skipped because MPP already holds the model pick.
     pub unchanged: usize,
-    /// Triggers in dry-run mode whose prediction would have been written.
+    /// Triggers in dry-run mode, counted before any forecast comparison:
+    /// dry-run does not read MPP and therefore cannot detect a pick already
+    /// registered there.
     pub dry_writes: usize,
     /// Triggers skipped for missing data, model errors, a passed kickoff or
     /// a non-transient write failure.
@@ -290,10 +296,35 @@ impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E> {
                 }
             };
 
-            let pick = prediction.pick.to_string();
-            let unchanged = self.state.matches[&match_id].written_score() == Some(pick.as_str());
+            if self.mode == Mode::Dry {
+                log_trigger(
+                    &fixture,
+                    trigger,
+                    home_elo,
+                    away_elo,
+                    &prediction,
+                    "dry_run",
+                );
+                self.mark_trigger(&match_id, trigger, now)?;
+                report.triggers += 1;
+                report.dry_writes += 1;
+                continue;
+            }
 
-            if unchanged {
+            let (remote, remote_known) = match self.mpp.fetch_forecast(&match_id).await {
+                Ok(forecast) => (forecast, true),
+                Err(error) => {
+                    warn!(
+                        match_id = %match_id,
+                        trigger = ?trigger,
+                        error = %error,
+                        "cannot read the MPP forecast; writing without the idempotence check"
+                    );
+                    (None, false)
+                }
+            };
+
+            if remote == Some(prediction.pick) {
                 log_trigger(
                     &fixture,
                     trigger,
@@ -308,19 +339,25 @@ impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E> {
                 continue;
             }
 
-            if self.mode == Mode::Dry {
-                log_trigger(
-                    &fixture,
-                    trigger,
-                    home_elo,
-                    away_elo,
-                    &prediction,
-                    "dry_run",
+            let last_written = self.state.matches[&match_id].written_score();
+            let remote_text = remote.map(|score| score.to_string());
+            let reason = match (remote_known, remote_text.as_deref()) {
+                // The read failed: already warned, nothing was observed.
+                (false, _) => None,
+                (true, None) => Some("no forecast registered"),
+                (true, Some(remote)) if last_written != Some(remote) => Some("manual edit"),
+                (true, Some(_)) => None,
+            };
+            if let Some(reason) = reason {
+                info!(
+                    match_id = %match_id,
+                    trigger = ?trigger,
+                    reason,
+                    last_written = ?last_written,
+                    remote = ?remote_text,
+                    pick = %prediction.pick,
+                    "overwriting the registered forecast"
                 );
-                self.mark_trigger(&match_id, trigger, now)?;
-                report.triggers += 1;
-                report.dry_writes += 1;
-                continue;
             }
 
             match self.mpp.submit_forecast(&match_id, prediction.pick).await {
