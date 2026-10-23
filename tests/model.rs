@@ -12,7 +12,7 @@ fn assert_close(actual: f64, expected: f64, tolerance: f64) {
 }
 
 #[test]
-fn reference_case_matches_spec() {
+fn reference_case_matches_expected_values() {
     let odds = Odds {
         home: 81.0,
         draw: 117.0,

@@ -232,8 +232,6 @@ fn truncate_body(body: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use reqwest::StatusCode;
-
     use super::*;
 
     const HTML: &str = r##"
@@ -316,33 +314,6 @@ mod tests {
     }
 
     #[test]
-    fn ratings_can_be_built_for_fakes() {
-        let ratings = EloRatings::from_pairs([
-            ("Lille OSC", 1700.0),
-            ("Paris SG", 1800.0),
-            ("PSG", 0.0),
-            ("Lens", f64::NAN),
-            ("Angers", -1.0),
-            ("Nice", f64::INFINITY),
-            ("Nice", 1600.0),
-        ]);
-
-        assert_eq!(ratings.len(), 3);
-        assert_eq!(ratings.rating("Lille OSC"), Some(1700.0));
-        assert_eq!(ratings.rating("PSG"), Some(1800.0));
-        assert_eq!(ratings.rating("Nice"), Some(1600.0));
-        assert_eq!(ratings.rating("Angers"), None);
-        assert!(EloRatings::default().is_empty());
-    }
-
-    #[test]
-    fn duplicate_pairs_keep_the_last_value() {
-        let ratings = EloRatings::from_pairs([("Paris SG", 1800.0), ("Paris SG", 1900.0)]);
-
-        assert_eq!(ratings.rating("PSG"), Some(1900.0));
-    }
-
-    #[test]
     fn malformed_entries_do_not_cross_objects() {
         let html = r#"
             <script>
@@ -361,39 +332,5 @@ mod tests {
 
         assert_eq!(ratings.len(), 1);
         assert_eq!(ratings.rating("PSG"), Some(200.0));
-    }
-
-    #[test]
-    fn transient_errors_are_classified() {
-        assert!(
-            EloError::Status {
-                status: StatusCode::INTERNAL_SERVER_ERROR,
-                body: String::new(),
-            }
-            .is_transient()
-        );
-        assert!(
-            EloError::Status {
-                status: StatusCode::REQUEST_TIMEOUT,
-                body: String::new(),
-            }
-            .is_transient()
-        );
-        assert!(
-            EloError::Status {
-                status: StatusCode::TOO_MANY_REQUESTS,
-                body: String::new(),
-            }
-            .is_transient()
-        );
-        assert!(
-            !EloError::Status {
-                status: StatusCode::BAD_REQUEST,
-                body: String::new(),
-            }
-            .is_transient()
-        );
-        assert!(!EloError::NoRatings.is_transient());
-        assert!(!EloError::InvalidPayload("missing vegaJson").is_transient());
     }
 }

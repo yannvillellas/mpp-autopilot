@@ -332,7 +332,7 @@ mod tests {
     }
 
     #[test]
-    fn tau_uses_spec_formula() {
+    fn tau_matches_the_dixon_coles_formula() {
         let lambdas = Lambdas {
             home: 1.2,
             away: 0.9,
