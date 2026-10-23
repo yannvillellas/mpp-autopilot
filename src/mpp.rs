@@ -20,6 +20,7 @@ pub const LIGUE_1_CHAMPIONSHIP_ID: u64 = 1;
 
 const APPLICATION: &str = "mppLfp";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const FORECAST_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_ERROR_BODY_CHARS: usize = 512;
 
 /// Club referenced by an MPP match.
@@ -71,16 +72,18 @@ pub trait MppApi: Send + Sync {
 
     /// Reads back the exact score registered for the `general` contest.
     ///
-    /// Returns `None` when no forecast has been submitted for the match yet,
-    /// including when MPP answers `404`. This is the source of truth for
-    /// idempotence: the local state only records what the bot itself wrote.
+    /// Returns `None` when no forecast has been submitted for the match yet.
+    /// A `404` is logged as an anomaly and treated as no forecast: the
+    /// observed API uses `200 {}` for an unknown match id and `400` for a
+    /// malformed one. This is the source of truth for idempotence: the local
+    /// state only records what the bot itself wrote.
     async fn fetch_forecast(&self, match_id: &str) -> Result<Option<Score>, MppError>;
 }
 
 /// HTTP client for the private MPP API.
 pub struct MppClient {
     http: reqwest::Client,
-    base_url: &'static str,
+    base_url: String,
     token: String,
 }
 
@@ -94,9 +97,23 @@ impl MppClient {
 
         Ok(Self {
             http,
-            base_url: MPP_BASE_URL,
+            base_url: MPP_BASE_URL.to_owned(),
             token: token.into(),
         })
+    }
+
+    // Test-only seam. Integration tests compile the library without
+    // `cfg(test)`, so the wiremock tests must stay in this module. Do not move
+    // them to `tests/` without making this constructor a deliberate public
+    // API.
+    #[cfg(test)]
+    fn with_base_url(
+        token: impl Into<String>,
+        base_url: impl Into<String>,
+    ) -> Result<Self, MppError> {
+        let mut client = Self::new(token)?;
+        client.base_url = base_url.into();
+        Ok(client)
     }
 
     fn request(&self, method: Method, path: &str) -> reqwest::RequestBuilder {
@@ -159,6 +176,7 @@ impl MppApi for MppClient {
         let path = format!("/user-match-forecasts/{match_id}");
         let response = self
             .request(Method::GET, &path)
+            .timeout(FORECAST_READ_TIMEOUT)
             .send()
             .await
             .map_err(MppError::Network)?;
@@ -382,10 +400,9 @@ fn parse_odds(quotations: Option<&Value>) -> Option<Odds> {
 /// Observed shapes (probed 2026-10-23): a registered forecast answers an
 /// object with `general`, an unknown match id answers `{}`, and a purged
 /// forecast answers `{ "general": null }`. All of those mean "nothing to
-/// compare", so the bot writes. An object carrying other keys but no
-/// `general` is a schema change and is reported as an invalid payload, so a
-/// wrong assumption about the private API shows up in the logs instead of
-/// silently disabling idempotence.
+/// compare", so the bot writes. A non-empty payload without `general` is a
+/// schema change and is reported as an invalid payload, so a broken
+/// assumption about the private API shows up in the logs.
 fn parse_forecast(value: &Value) -> Result<Option<Score>, MppError> {
     let Some(payload) = value.as_object() else {
         return Err(MppError::InvalidPayload(
@@ -397,7 +414,9 @@ fn parse_forecast(value: &Value) -> Result<Option<Score>, MppError> {
         return if payload.is_empty() {
             Ok(None)
         } else {
-            Err(MppError::InvalidPayload("missing general forecast"))
+            Err(MppError::InvalidPayload(
+                "no general forecast in a non-empty payload",
+            ))
         };
     };
     if general.is_null() {
@@ -445,6 +464,8 @@ fn truncate_body(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use wiremock::matchers::{header, method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
 
@@ -622,9 +643,8 @@ mod tests {
 
     #[test]
     fn unexpected_forecast_payloads_are_rejected() {
-        // An object carrying other entities but no `general`, an array or a
-        // bare value would otherwise read as "no forecast" and silently
-        // disable the idempotence check.
+        // A non-empty object without `general`, an array or a bare value is a
+        // schema change, not "no forecast"; it must stay visible.
         for payload in [
             json!({ "mpp_challenge_X": { "homeScore": 1 } }),
             json!([]),
@@ -657,5 +677,108 @@ mod tests {
         assert_eq!(body["homeScore"], 1);
         assert_eq!(body["awayScore"], 1);
         assert_eq!(body["originPage"], "matchSheet");
+    }
+
+    async fn forecast_client() -> (MockServer, MppClient) {
+        let server = MockServer::start().await;
+        let client = MppClient::with_base_url("token", server.uri()).expect("client");
+        (server, client)
+    }
+
+    #[tokio::test]
+    async fn fetch_forecast_reads_the_general_score() {
+        let (server, client) = forecast_client().await;
+        Mock::given(method("GET"))
+            .and(path("/user-match-forecasts/match-1"))
+            .and(query_param("application", "mppLfp"))
+            .and(header("application", "mppLfp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "general": { "homeScore": 1, "awayScore": 0 }
+            })))
+            .mount(&server)
+            .await;
+
+        assert_eq!(
+            client.fetch_forecast("match-1").await.expect("forecast"),
+            Some(Score { home: 1, away: 0 })
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_forecast_treats_404_as_no_forecast() {
+        let (server, client) = forecast_client().await;
+        Mock::given(method("GET"))
+            .and(path("/user-match-forecasts/match-1"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        assert_eq!(
+            client.fetch_forecast("match-1").await.expect("forecast"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_forecast_rejects_unauthorized() {
+        let (server, client) = forecast_client().await;
+        Mock::given(method("GET"))
+            .and(path("/user-match-forecasts/match-1"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+
+        assert!(matches!(
+            client.fetch_forecast("match-1").await,
+            Err(MppError::Unauthorized)
+        ));
+    }
+
+    #[tokio::test]
+    async fn fetch_forecast_reports_server_errors() {
+        let (server, client) = forecast_client().await;
+        Mock::given(method("GET"))
+            .and(path("/user-match-forecasts/match-1"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+
+        assert!(matches!(
+            client.fetch_forecast("match-1").await,
+            Err(MppError::Status { status, .. })
+                if status == StatusCode::SERVICE_UNAVAILABLE
+        ));
+    }
+
+    #[tokio::test]
+    async fn fetch_forecast_rejects_invalid_json() {
+        let (server, client) = forecast_client().await;
+        Mock::given(method("GET"))
+            .and(path("/user-match-forecasts/match-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+            .mount(&server)
+            .await;
+
+        assert!(matches!(
+            client.fetch_forecast("match-1").await,
+            Err(MppError::Json(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn fetch_forecast_rejects_non_empty_payload_without_general() {
+        let (server, client) = forecast_client().await;
+        Mock::given(method("GET"))
+            .and(path("/user-match-forecasts/match-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "x": 1 })))
+            .mount(&server)
+            .await;
+
+        assert!(matches!(
+            client.fetch_forecast("match-1").await,
+            Err(MppError::InvalidPayload(
+                "no general forecast in a non-empty payload"
+            ))
+        ));
     }
 }

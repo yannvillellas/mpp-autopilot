@@ -345,8 +345,10 @@ impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E> {
                 // The read failed: already warned, nothing was observed.
                 (false, _) => None,
                 (true, None) => Some("no forecast registered"),
-                (true, Some(remote)) if last_written != Some(remote) => Some("manual edit"),
-                (true, Some(_)) => None,
+                (true, Some(remote)) if last_written != Some(remote) => {
+                    Some("remote forecast differs from the last write")
+                }
+                (true, Some(_)) => Some("model pick changed"),
             };
             if let Some(reason) = reason {
                 info!(

@@ -47,6 +47,7 @@ struct FakeMpp {
     forecasts: Mutex<HashMap<String, Score>>,
     fail_status: Mutex<Option<(Option<String>, StatusCode)>>,
     fail_reads: Mutex<Option<StatusCode>>,
+    lose_write_response: Mutex<bool>,
     reads: AtomicUsize,
 }
 
@@ -58,6 +59,7 @@ impl FakeMpp {
             forecasts: Mutex::new(HashMap::new()),
             fail_status: Mutex::new(None),
             fail_reads: Mutex::new(None),
+            lose_write_response: Mutex::new(false),
             reads: AtomicUsize::new(0),
         }
     }
@@ -73,6 +75,15 @@ impl FakeMpp {
 
     fn fail_reads(&self, status: StatusCode) {
         *self.fail_reads.lock().expect("fail reads lock") = Some(status);
+    }
+
+    /// Records the next write but returns a transient error, simulating a
+    /// successful PATCH whose response or state save was lost.
+    fn lose_next_write_response(&self) {
+        *self
+            .lose_write_response
+            .lock()
+            .expect("lose write response lock") = true;
     }
 
     /// Simulates a forecast already registered in MPP, for example one the
@@ -136,6 +147,20 @@ impl MppApi for FakeMpp {
             .lock()
             .expect("forecasts lock")
             .insert(match_id.to_owned(), score);
+
+        let lose_response = std::mem::take(
+            &mut *self
+                .lose_write_response
+                .lock()
+                .expect("lose write response lock"),
+        );
+        if lose_response {
+            return Err(MppError::Status {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                body: "forced lost response".to_owned(),
+            });
+        }
+
         Ok(())
     }
 }
@@ -258,6 +283,7 @@ async fn write_mode_writes_publish_and_persists() {
     assert_eq!(saved.written_score(), Some("1-1"));
     assert_eq!(saved.last_written_at, Some(now()));
     assert_eq!(elo.calls(), 1);
+    assert_eq!(mpp.reads(), 1);
 
     let loaded = State::load(&path, Mode::Write).expect("load state");
     assert_eq!(loaded.matches["match-1"].written_score(), Some("1-1"));
@@ -349,6 +375,7 @@ async fn manual_forecast_edit_is_overwritten() {
     assert_eq!(report.triggers, 1);
     assert_eq!(report.writes, 1);
     assert_eq!(report.unchanged, 0);
+    assert_eq!(mpp.reads(), 1);
     assert_eq!(
         mpp.writes(),
         vec![("match-1".to_owned(), Score { home: 1, away: 1 })]
@@ -357,35 +384,43 @@ async fn manual_forecast_edit_is_overwritten() {
 }
 
 #[tokio::test]
-async fn transient_read_failure_still_writes() {
-    let mpp = FakeMpp::new(snapshot(kickoff()));
-    mpp.fail_reads(StatusCode::INTERNAL_SERVER_ERROR);
-    let elo = FakeElo::new(ratings());
-    let dir = TestDir::new();
-    let path = dir.path().join("state.json");
-    let mut runner = Orchestrator::new(
-        &mpp,
-        &elo,
-        Mode::Write,
-        state_with_match(Mode::Write, kickoff()),
-        path,
-    );
+async fn read_failures_still_write() {
+    for status in [StatusCode::INTERNAL_SERVER_ERROR, StatusCode::BAD_REQUEST] {
+        let mpp = FakeMpp::new(snapshot(kickoff()));
+        mpp.fail_reads(status);
+        let elo = FakeElo::new(ratings());
+        let dir = TestDir::new();
+        let path = dir.path().join("state.json");
+        let mut runner = Orchestrator::new(
+            &mpp,
+            &elo,
+            Mode::Write,
+            state_with_match(Mode::Write, kickoff()),
+            path,
+        );
 
-    let report = runner.execute_once(now()).await.expect("execute once");
+        let report = runner.execute_once(now()).await.expect("execute once");
 
-    assert_eq!(report.triggers, 1);
-    assert_eq!(report.writes, 1);
-    assert_eq!(
-        mpp.writes(),
-        vec![("match-1".to_owned(), Score { home: 1, away: 1 })]
-    );
-    assert!(runner.state().matches["match-1"].is_trigger_done(Trigger::Publish));
+        assert_eq!(report.triggers, 1, "status {status}");
+        assert_eq!(report.writes, 1, "status {status}");
+        assert_eq!(report.skipped, 0, "status {status}");
+        assert_eq!(mpp.reads(), 1, "status {status}");
+        assert_eq!(
+            mpp.writes(),
+            vec![("match-1".to_owned(), Score { home: 1, away: 1 })],
+            "status {status}"
+        );
+        assert!(
+            runner.state().matches["match-1"].is_trigger_done(Trigger::Publish),
+            "status {status}"
+        );
+    }
 }
 
 #[tokio::test]
-async fn permanent_read_failure_still_writes() {
+async fn lost_write_response_is_recovered_without_a_duplicate() {
     let mpp = FakeMpp::new(snapshot(kickoff()));
-    mpp.fail_reads(StatusCode::BAD_REQUEST);
+    mpp.lose_next_write_response();
     let elo = FakeElo::new(ratings());
     let dir = TestDir::new();
     let path = dir.path().join("state.json");
@@ -397,15 +432,22 @@ async fn permanent_read_failure_still_writes() {
         path,
     );
 
-    let report = runner.execute_once(now()).await.expect("execute once");
+    runner
+        .execute_once(now())
+        .await
+        .expect_err("lost write response");
+
+    assert_eq!(mpp.writes().len(), 1);
+    assert_eq!(mpp.reads(), 1);
+    assert!(!runner.state().matches["match-1"].is_trigger_done(Trigger::Publish));
+
+    let report = runner.execute_once(now()).await.expect("retry");
 
     assert_eq!(report.triggers, 1);
-    assert_eq!(report.writes, 1);
-    assert_eq!(report.skipped, 0);
-    assert_eq!(
-        mpp.writes(),
-        vec![("match-1".to_owned(), Score { home: 1, away: 1 })]
-    );
+    assert_eq!(report.writes, 0);
+    assert_eq!(report.unchanged, 1);
+    assert_eq!(mpp.writes().len(), 1);
+    assert_eq!(mpp.reads(), 2);
     assert!(runner.state().matches["match-1"].is_trigger_done(Trigger::Publish));
 }
 
@@ -427,6 +469,7 @@ async fn failed_write_does_not_mark_the_trigger() {
     let error = runner.execute_once(now()).await.expect_err("write failure");
 
     assert!(matches!(error, RunError::Mpp(_)));
+    assert_eq!(mpp.reads(), 1);
     let saved = &runner.state().matches["match-1"];
     assert!(!saved.is_trigger_done(Trigger::Publish));
     assert_eq!(saved.written_score(), None);
@@ -507,6 +550,7 @@ async fn t60_and_t5_due_together_write_once() {
     assert_eq!(report.triggers, 2);
     assert_eq!(report.writes, 1);
     assert_eq!(report.unchanged, 1);
+    assert_eq!(mpp.reads(), 2);
     assert_eq!(mpp.writes().len(), 1);
 
     let saved = &runner.state().matches["match-1"];
@@ -559,6 +603,7 @@ async fn permanent_write_failure_marks_the_trigger() {
     assert_eq!(report.triggers, 1);
     assert_eq!(report.writes, 0);
     assert_eq!(report.skipped, 1);
+    assert_eq!(mpp.reads(), 1);
     assert!(mpp.writes().is_empty());
     assert!(runner.state().matches["match-1"].is_trigger_done(Trigger::Publish));
 }
@@ -679,7 +724,7 @@ async fn kickoff_change_resets_pre_match_triggers() {
 }
 
 #[tokio::test]
-async fn two_runs_do_not_rewrite_the_same_score() {
+async fn completed_triggers_are_not_replayed() {
     let mpp = FakeMpp::new(snapshot(kickoff()));
     let elo = FakeElo::new(ratings());
     let dir = TestDir::new();
