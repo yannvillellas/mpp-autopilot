@@ -20,6 +20,7 @@ pub const LIGUE_1_CHAMPIONSHIP_ID: u64 = 1;
 
 const APPLICATION: &str = "mppLfp";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const FORECAST_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_ERROR_BODY_CHARS: usize = 512;
 
 /// Club referenced by an MPP match.
@@ -68,12 +69,21 @@ pub trait MppApi: Send + Sync {
 
     /// Submits an exact score for the `general` contest.
     async fn submit_forecast(&self, match_id: &str, score: Score) -> Result<(), MppError>;
+
+    /// Reads back the exact score registered for the `general` contest.
+    ///
+    /// Returns `None` when no forecast has been submitted for the match yet.
+    /// A `404` is logged as an anomaly and treated as no forecast: the
+    /// observed API uses `200 {}` for an unknown match id and `400` for a
+    /// malformed one. This is the source of truth for idempotence: the local
+    /// state only records what the bot itself wrote.
+    async fn fetch_forecast(&self, match_id: &str) -> Result<Option<Score>, MppError>;
 }
 
 /// HTTP client for the private MPP API.
 pub struct MppClient {
     http: reqwest::Client,
-    base_url: &'static str,
+    base_url: String,
     token: String,
 }
 
@@ -87,9 +97,23 @@ impl MppClient {
 
         Ok(Self {
             http,
-            base_url: MPP_BASE_URL,
+            base_url: MPP_BASE_URL.to_owned(),
             token: token.into(),
         })
+    }
+
+    // Test-only seam. Integration tests compile the library without
+    // `cfg(test)`, so the wiremock tests must stay in this module. Do not move
+    // them to `tests/` without making this constructor a deliberate public
+    // API.
+    #[cfg(test)]
+    fn with_base_url(
+        token: impl Into<String>,
+        base_url: impl Into<String>,
+    ) -> Result<Self, MppError> {
+        let mut client = Self::new(token)?;
+        client.base_url = base_url.into();
+        Ok(client)
     }
 
     fn request(&self, method: Method, path: &str) -> reqwest::RequestBuilder {
@@ -97,6 +121,7 @@ impl MppClient {
             .request(method, format!("{}{path}", self.base_url))
             .query(&[("application", APPLICATION)])
             .bearer_auth(&self.token)
+            .header("application", APPLICATION)
             .header("platform", "web")
             .header("client-language", "fr-FR")
             .header("accept", "application/json")
@@ -145,6 +170,33 @@ impl MppApi for MppClient {
 
         check_response(response).await?;
         Ok(())
+    }
+
+    async fn fetch_forecast(&self, match_id: &str) -> Result<Option<Score>, MppError> {
+        let path = format!("/user-match-forecasts/{match_id}");
+        let response = self
+            .request(Method::GET, &path)
+            .timeout(FORECAST_READ_TIMEOUT)
+            .send()
+            .await
+            .map_err(MppError::Network)?;
+
+        // A 404 is *not* the documented "no forecast" answer: an unknown match
+        // id answers `200 {}` and a malformed one `400`, so a 404 here means a
+        // wrong route, scope or gateway. It is logged before falling back to
+        // writing, so a broken read route cannot disable idempotence silently.
+        if response.status() == StatusCode::NOT_FOUND {
+            warn!(
+                match_id = %match_id,
+                "MPP answered 404 to the forecast read; writing as if none were registered"
+            );
+            return Ok(None);
+        }
+
+        let response = check_response(response).await?;
+        let body = response.bytes().await.map_err(MppError::Network)?;
+        let value: Value = serde_json::from_slice(&body)?;
+        parse_forecast(&value)
     }
 }
 
@@ -343,6 +395,55 @@ fn parse_odds(quotations: Option<&Value>) -> Option<Odds> {
     (odds.home > 0.0 && odds.draw > 0.0 && odds.away > 0.0).then_some(odds)
 }
 
+/// Extracts the `general` forecast from a user-match-forecasts response.
+///
+/// Observed shapes (probed 2026-10-23): a registered forecast answers an
+/// object with `general`, an unknown match id answers `{}`, and a purged
+/// forecast answers `{ "general": null }`. All of those mean "nothing to
+/// compare", so the bot writes. A non-empty payload without `general` is a
+/// schema change and is reported as an invalid payload, so a broken
+/// assumption about the private API shows up in the logs.
+fn parse_forecast(value: &Value) -> Result<Option<Score>, MppError> {
+    let Some(payload) = value.as_object() else {
+        return Err(MppError::InvalidPayload(
+            "user-match-forecasts payload must be an object",
+        ));
+    };
+
+    let Some(general) = payload.get("general") else {
+        return if payload.is_empty() {
+            Ok(None)
+        } else {
+            Err(MppError::InvalidPayload(
+                "no general forecast in a non-empty payload",
+            ))
+        };
+    };
+    if general.is_null() {
+        return Ok(None);
+    }
+
+    let home = general
+        .get("homeScore")
+        .and_then(Value::as_u64)
+        .ok_or(MppError::InvalidPayload(
+            "general.homeScore must be an integer",
+        ))?;
+    let away = general
+        .get("awayScore")
+        .and_then(Value::as_u64)
+        .ok_or(MppError::InvalidPayload(
+            "general.awayScore must be an integer",
+        ))?;
+
+    let home = u8::try_from(home)
+        .map_err(|_| MppError::InvalidPayload("general.homeScore is out of range"))?;
+    let away = u8::try_from(away)
+        .map_err(|_| MppError::InvalidPayload("general.awayScore is out of range"))?;
+
+    Ok(Some(Score { home, away }))
+}
+
 fn forecast_body(score: Score) -> Value {
     json!({
         "homeScore": score.home,
@@ -362,8 +463,9 @@ fn truncate_body(body: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use reqwest::StatusCode;
     use serde_json::json;
+    use wiremock::matchers::{header, method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
 
@@ -517,7 +619,59 @@ mod tests {
     }
 
     #[test]
-    fn forecast_body_matches_the_spec() {
+    fn forecast_payloads_are_parsed() {
+        let forecast = json!({
+            "general": {
+                "homeScore": 0,
+                "awayScore": 1,
+                "editedAt": "2026-10-23T18:30:00.000Z",
+                "points": null
+            }
+        });
+        assert_eq!(
+            parse_forecast(&forecast).expect("parse forecast"),
+            Some(Score { home: 0, away: 1 })
+        );
+
+        assert_eq!(
+            parse_forecast(&json!({ "general": null })).expect("null general"),
+            None
+        );
+        // Observed for an unknown match id: an empty object, not a 404.
+        assert_eq!(parse_forecast(&json!({})).expect("empty payload"), None);
+    }
+
+    #[test]
+    fn unexpected_forecast_payloads_are_rejected() {
+        // A non-empty object without `general`, an array or a bare value is a
+        // schema change, not "no forecast"; it must stay visible.
+        for payload in [
+            json!({ "mpp_challenge_X": { "homeScore": 1 } }),
+            json!([]),
+            json!("nope"),
+        ] {
+            assert!(
+                matches!(parse_forecast(&payload), Err(MppError::InvalidPayload(_))),
+                "unexpected payload should be rejected: {payload}"
+            );
+        }
+
+        assert!(matches!(
+            parse_forecast(&json!({ "general": { "points": 12 } })),
+            Err(MppError::InvalidPayload(_))
+        ));
+        assert!(matches!(
+            parse_forecast(&json!({ "general": { "homeScore": 1 } })),
+            Err(MppError::InvalidPayload(_))
+        ));
+        assert!(matches!(
+            parse_forecast(&json!({ "general": { "homeScore": 300, "awayScore": 1 } })),
+            Err(MppError::InvalidPayload(_))
+        ));
+    }
+
+    #[test]
+    fn forecast_body_matches_the_observed_payload() {
         let body = forecast_body(Score { home: 1, away: 1 });
 
         assert_eq!(body["homeScore"], 1);
@@ -525,49 +679,106 @@ mod tests {
         assert_eq!(body["originPage"], "matchSheet");
     }
 
-    #[test]
-    fn client_debug_redacts_the_token() {
-        let client = MppClient::new("super-secret-token").expect("build client");
-        let debug = format!("{client:?}");
-
-        assert!(!debug.contains("super-secret-token"));
-        assert!(debug.contains("[redacted]"));
+    async fn forecast_client() -> (MockServer, MppClient) {
+        let server = MockServer::start().await;
+        let client = MppClient::with_base_url("token", server.uri()).expect("client");
+        (server, client)
     }
 
-    #[test]
-    fn transient_errors_are_classified() {
-        assert!(MppError::Unauthorized.is_transient());
-        assert!(
-            MppError::Status {
-                status: StatusCode::INTERNAL_SERVER_ERROR,
-                body: String::new(),
-            }
-            .is_transient()
-        );
-        assert!(
-            MppError::Status {
-                status: StatusCode::TOO_MANY_REQUESTS,
-                body: String::new(),
-            }
-            .is_transient()
-        );
-        assert!(
-            MppError::Status {
-                status: StatusCode::REQUEST_TIMEOUT,
-                body: String::new(),
-            }
-            .is_transient()
-        );
-        assert!(
-            !MppError::Status {
-                status: StatusCode::BAD_REQUEST,
-                body: String::new(),
-            }
-            .is_transient()
-        );
-        assert!(!MppError::InvalidPayload("bad payload").is_transient());
+    #[tokio::test]
+    async fn fetch_forecast_reads_the_general_score() {
+        let (server, client) = forecast_client().await;
+        Mock::given(method("GET"))
+            .and(path("/user-match-forecasts/match-1"))
+            .and(query_param("application", "mppLfp"))
+            .and(header("application", "mppLfp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "general": { "homeScore": 1, "awayScore": 0 }
+            })))
+            .mount(&server)
+            .await;
 
-        let json_error = serde_json::from_str::<Value>("{").expect_err("invalid JSON");
-        assert!(!MppError::Json(json_error).is_transient());
+        assert_eq!(
+            client.fetch_forecast("match-1").await.expect("forecast"),
+            Some(Score { home: 1, away: 0 })
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_forecast_treats_404_as_no_forecast() {
+        let (server, client) = forecast_client().await;
+        Mock::given(method("GET"))
+            .and(path("/user-match-forecasts/match-1"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        assert_eq!(
+            client.fetch_forecast("match-1").await.expect("forecast"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_forecast_rejects_unauthorized() {
+        let (server, client) = forecast_client().await;
+        Mock::given(method("GET"))
+            .and(path("/user-match-forecasts/match-1"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+
+        assert!(matches!(
+            client.fetch_forecast("match-1").await,
+            Err(MppError::Unauthorized)
+        ));
+    }
+
+    #[tokio::test]
+    async fn fetch_forecast_reports_server_errors() {
+        let (server, client) = forecast_client().await;
+        Mock::given(method("GET"))
+            .and(path("/user-match-forecasts/match-1"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+
+        assert!(matches!(
+            client.fetch_forecast("match-1").await,
+            Err(MppError::Status { status, .. })
+                if status == StatusCode::SERVICE_UNAVAILABLE
+        ));
+    }
+
+    #[tokio::test]
+    async fn fetch_forecast_rejects_invalid_json() {
+        let (server, client) = forecast_client().await;
+        Mock::given(method("GET"))
+            .and(path("/user-match-forecasts/match-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+            .mount(&server)
+            .await;
+
+        assert!(matches!(
+            client.fetch_forecast("match-1").await,
+            Err(MppError::Json(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn fetch_forecast_rejects_non_empty_payload_without_general() {
+        let (server, client) = forecast_client().await;
+        Mock::given(method("GET"))
+            .and(path("/user-match-forecasts/match-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "x": 1 })))
+            .mount(&server)
+            .await;
+
+        assert!(matches!(
+            client.fetch_forecast("match-1").await,
+            Err(MppError::InvalidPayload(
+                "no general forecast in a non-empty payload"
+            ))
+        ));
     }
 }

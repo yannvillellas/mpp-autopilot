@@ -4,6 +4,24 @@ MPP Autopilot is the Rust automation that predicts Ligue 1 scores for the
 MPP (Mon Petit Prono) app and runs on a server with Docker. `README.md` gives
 the project overview.
 
+## Commands
+
+- Build: `cargo build`
+- Run once: `cargo run -- once`
+- List fixtures: `cargo run -- list`
+- Test: `cargo test`
+- Lint: `cargo clippy --all-targets -- -D warnings`
+- Format: `cargo fmt`
+- Docker: `docker compose build`
+
+## Documentation
+
+- `README.md` is user-facing: keep it short and link to `docs/`.
+- `docs/mpp-api.md` records the observed private MPP API contract.
+- `docs/architecture.md` explains the runtime flow, model, and state.
+- MPP has no public OpenAPI contract; verify API changes against the shipped
+  web client or observed responses.
+
 ## Before finishing a change
 
 - [ ] `cargo fmt`
@@ -27,6 +45,29 @@ the project overview.
 - Smallest possible visibility (`pub(crate)` by default).
 - Document modules (`//!`) and public items (`///`).
 
+## Testing
+
+- Unit tests for private helpers live in a `#[cfg(test)] mod tests` at the
+  bottom of the module that owns them.
+- Integration tests for public behavior live in `tests/<module>.rs` and use
+  only the crate's public API.
+- Do not widen visibility only to move a unit test into `tests/`; keep the
+  test next to the private code instead.
+- Test names describe behavior, not a document or a specification file.
+
+## Comments
+
+- Every module starts with `//!` docs; every public item has `///` docs.
+- Private functions get `///` docs only when their contract is not obvious.
+- Keep explanatory prose in doc comments. Use `//` inside a function body only
+  for a non-obvious invariant, never to restate the code.
+- Comments and docs are written in English.
+
+## Security
+
+- Never commit, print, or log `MPP_TOKEN`.
+- Keep secrets in `.env` locally and in the deployment environment otherwise.
+
 ## Git workflow
 
 - One feature per branch: `feat/<short-name>`, created from `main`.
@@ -37,7 +78,20 @@ the project overview.
 ## Current requirements
 
 - Current scope: Ligue 1. Other competitions may come later.
-- MPP Autopilot performs one MPP fetch per day; do not poll.
+- MPP Autopilot performs one snapshot fetch per day; do not poll outside the
+  scheduled triggers. In write mode, each trigger reads the forecast back
+  before writing.
 - `WRITE=false` by default; writing is opt-in.
-- State is persisted atomically; never submit twice for the same trigger.
+- State is persisted atomically. A wrong score is worse than a redundant
+  write: never skip a write merely because a previous write is recorded, and
+  write anyway when the forecast read fails.
 - Docker Compose is the deployment target.
+
+## References
+
+- Rust Book, test organization:
+  <https://doc.rust-lang.org/book/ch11-03-test-organization.html>
+- Rust API Guidelines, documentation:
+  <https://rust-lang.github.io/api-guidelines/documentation.html>
+- Serde field attributes, including `alias`:
+  <https://serde.rs/field-attrs.html>

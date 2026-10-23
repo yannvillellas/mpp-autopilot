@@ -1,29 +1,16 @@
 # MPP Autopilot
 
-MPP Autopilot is an autonomous Ligue 1 prediction bot for
-[MPP (Mon Petit Prono)](https://mpp.football), powered by
-[ClubElo](https://clubelo.com).
-
-The bot reads the day's MPP fixtures and quotations once, computes the exact
-score that maximizes expected points, and submits it when the match is first
-seen, one hour before kickoff, and five minutes before kickoff.
-
-## Features
-
-- One MPP snapshot per day (two GETs); ClubElo is refreshed at each trigger.
-- Elo-driven Poisson model with a Dixon-Coles correction.
-- Expected-value pick based on the MPP quotations.
-- Dry-run by default; writing is opt-in.
-- Persistent state prevents completed triggers from being replayed across
-  restarts.
-- Single Rust binary, Docker-ready.
+MPP Autopilot is a Rust service that predicts Ligue 1 exact scores for
+[Mon Petit Prono](https://mpp.football). It combines [ClubElo](https://clubelo.com)
+ratings with the MPP quotations, computes the score with the highest expected
+points, and writes it to the MPP `general` contest.
 
 ## Quick start
 
 ```bash
 cp .env.example .env   # set MPP_TOKEN
 cargo run -- list      # fixtures and quotations
-cargo run -- once      # one daily pass, no writes
+cargo run -- once      # one daily pass (dry-run by default)
 ```
 
 With Docker:
@@ -34,16 +21,10 @@ docker compose logs -f
 docker compose run --rm mpp-autopilot check
 ```
 
-The runtime image is distroless: there is no shell inside the container.
-Use `docker compose logs`, `docker compose run --rm mpp-autopilot check`, or a
-temporary debug container. A dry-run smoke test is:
-
-```bash
-WRITE=false docker compose run --rm mpp-autopilot once
-```
-
-`once` shares `STATE_PATH` with the service. Stop the service or use a
-separate state path/volume before running it against a live deployment.
+The runtime image is distroless. Use `docker compose logs` or
+`docker compose run --rm mpp-autopilot check` instead of a shell. `once` shares
+the state file with the running service; stop the service or use a separate
+state path/volume.
 
 ## Configuration
 
@@ -55,13 +36,10 @@ separate state path/volume before running it against a live deployment.
 | `STATE_PATH` | `./state.json` | State file (Docker uses `/data/state.json`). |
 | `LOG_LEVEL`  | `INFO`         | `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`.   |
 
-`MPP_TOKEN` authenticates MPP Autopilot against the MPP app. The other variables
-configure the bot itself.
+`MPP_TOKEN` authenticates MPP Autopilot against the MPP app. `WRITE=false` runs
+the whole pipeline without submitting anything.
 
-`WRITE=false` runs the whole pipeline — fetch, model, logs — without submitting
-anything. Keep it for the first deployment and while testing changes.
-
-## CLI
+## Commands
 
 | Command               | Description                                      |
 | --------------------- | ------------------------------------------------ |
@@ -70,15 +48,10 @@ anything. Keep it for the first deployment and while testing changes.
 | `mpp-autopilot list`  | Print the Ligue 1 fixtures and quotations.       |
 | `mpp-autopilot check` | Validate the configuration and exit.             |
 
-## How it works
+## Documentation
 
-1. Once a day, fetch the Ligue 1 fixtures and quotations from MPP.
-2. At publication, T-60 and T-5, refresh ClubElo and compute the best exact
-   score.
-3. Submit it to the MPP `general` contest, which also feeds private leagues.
-
-The model turns the Elo gap into home/away expected goals, builds a 7×7 score
-matrix, and picks the score with the highest expected points.
+- [MPP API reference](docs/mpp-api.md)
+- [Architecture and behaviour](docs/architecture.md)
 
 ## Development
 
@@ -88,9 +61,6 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-## Notes
+## Disclaimer
 
-- The MPP API is private and undocumented; endpoints may change without notice.
-- Automated submissions may violate MPP's terms of service. Use at your own risk.
-- A crash between a successful PATCH and the state write is the residual
-  duplicate-submission window; reading forecasts back is out of scope.
+Automated submissions may violate MPP's terms of service. Use at your own risk.
