@@ -10,6 +10,7 @@
 //! ran, the kickoff of each match, and an audit trail of what the bot wrote.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
@@ -17,7 +18,7 @@ use thiserror::Error;
 use tracing::{info, warn};
 
 use crate::elo::{EloError, EloSite};
-use crate::model::{self, Prediction};
+use crate::model::{self, Prediction, Score};
 use crate::mpp::{Fixture, MppApi, MppError, Snapshot};
 use crate::scheduler;
 use crate::state::{MatchState, Mode, State, StateError, Trigger};
@@ -303,6 +304,7 @@ impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E> {
                     home_elo,
                     away_elo,
                     &prediction,
+                    RemoteForecast::NotRead,
                     "dry_run",
                 );
                 self.mark_trigger(&match_id, trigger, now)?;
@@ -311,8 +313,9 @@ impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E> {
                 continue;
             }
 
-            let (remote, remote_known) = match self.mpp.fetch_forecast(&match_id).await {
-                Ok(forecast) => (forecast, true),
+            let remote = match self.mpp.fetch_forecast(&match_id).await {
+                Ok(Some(score)) => RemoteForecast::Registered(score),
+                Ok(None) => RemoteForecast::Absent,
                 Err(error) => {
                     warn!(
                         match_id = %match_id,
@@ -320,17 +323,18 @@ impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E> {
                         error = %error,
                         "cannot read the MPP forecast; writing without the idempotence check"
                     );
-                    (None, false)
+                    RemoteForecast::Unreadable
                 }
             };
 
-            if remote == Some(prediction.pick) {
+            if remote.score() == Some(prediction.pick) {
                 log_trigger(
                     &fixture,
                     trigger,
                     home_elo,
                     away_elo,
                     &prediction,
+                    remote,
                     "unchanged",
                 );
                 self.mark_trigger(&match_id, trigger, now)?;
@@ -340,15 +344,15 @@ impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E> {
             }
 
             let last_written = self.state.matches[&match_id].written_score();
-            let remote_text = remote.map(|score| score.to_string());
-            let reason = match (remote_known, remote_text.as_deref()) {
+            let remote_text = remote.score().map(|score| score.to_string());
+            let reason = match remote {
                 // The read failed: already warned, nothing was observed.
-                (false, _) => None,
-                (true, None) => Some("no forecast registered"),
-                (true, Some(remote)) if last_written != Some(remote) => {
+                RemoteForecast::Unreadable | RemoteForecast::NotRead => None,
+                RemoteForecast::Absent => Some("no forecast registered"),
+                RemoteForecast::Registered(_) if last_written != remote_text.as_deref() => {
                     Some("remote forecast differs from the last write")
                 }
-                (true, Some(_)) => Some("model pick changed"),
+                RemoteForecast::Registered(_) => Some("model pick changed"),
             };
             if let Some(reason) = reason {
                 info!(
@@ -356,7 +360,7 @@ impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E> {
                     trigger = ?trigger,
                     reason,
                     last_written = ?last_written,
-                    remote = ?remote_text,
+                    remote = %remote,
                     pick = %prediction.pick,
                     "overwriting the registered forecast"
                 );
@@ -377,6 +381,7 @@ impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E> {
                         home_elo,
                         away_elo,
                         &prediction,
+                        remote,
                         "written",
                     );
                     self.state.save(&self.state_path)?;
@@ -390,6 +395,7 @@ impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E> {
                         home_elo,
                         away_elo,
                         &prediction,
+                        remote,
                         "write_failed",
                     );
                     warn!(
@@ -416,6 +422,7 @@ impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E> {
                         home_elo,
                         away_elo,
                         &prediction,
+                        remote,
                         "write_failed",
                     );
                     warn!(
@@ -460,12 +467,47 @@ impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E> {
     }
 }
 
+/// Outcome of reading the registered forecast back from MPP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoteForecast {
+    /// Dry-run: MPP was not queried.
+    NotRead,
+    /// The read failed; the registered score is unknown.
+    Unreadable,
+    /// MPP returned no forecast for the match.
+    Absent,
+    /// MPP holds this score.
+    Registered(Score),
+}
+
+impl RemoteForecast {
+    /// Returns the registered score, when MPP returned one.
+    fn score(self) -> Option<Score> {
+        match self {
+            Self::Registered(score) => Some(score),
+            Self::NotRead | Self::Unreadable | Self::Absent => None,
+        }
+    }
+}
+
+impl fmt::Display for RemoteForecast {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotRead => f.write_str("not_read"),
+            Self::Unreadable => f.write_str("unreadable"),
+            Self::Absent => f.write_str("absent"),
+            Self::Registered(score) => write!(f, "{score}"),
+        }
+    }
+}
+
 fn log_trigger(
     fixture: &Fixture,
     trigger: Trigger,
     home_elo: f64,
     away_elo: f64,
     prediction: &Prediction,
+    remote: RemoteForecast,
     status: &'static str,
 ) {
     info!(
@@ -489,7 +531,35 @@ fn log_trigger(
         pick_probability = prediction.pick_probability,
         recommendation = ?prediction.recommendation,
         recommendation_ev = prediction.recommendation_ev,
+        remote = %remote,
         status,
         "MPP trigger"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_forecast_renders_each_read_outcome() {
+        assert_eq!(RemoteForecast::NotRead.to_string(), "not_read");
+        assert_eq!(RemoteForecast::Unreadable.to_string(), "unreadable");
+        assert_eq!(RemoteForecast::Absent.to_string(), "absent");
+        assert_eq!(
+            RemoteForecast::Registered(Score { home: 1, away: 0 }).to_string(),
+            "1-0"
+        );
+    }
+
+    #[test]
+    fn remote_forecast_only_exposes_a_registered_score() {
+        assert_eq!(
+            RemoteForecast::Registered(Score { home: 0, away: 1 }).score(),
+            Some(Score { home: 0, away: 1 })
+        );
+        assert_eq!(RemoteForecast::NotRead.score(), None);
+        assert_eq!(RemoteForecast::Unreadable.score(), None);
+        assert_eq!(RemoteForecast::Absent.score(), None);
+    }
 }
