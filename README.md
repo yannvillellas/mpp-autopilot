@@ -1,15 +1,17 @@
 # MPP Autopilot
 
 MPP Autopilot is a Rust service that predicts Ligue 1 exact scores for
-[Mon Petit Prono](https://mpp.football). It computes its own Elo ratings from
-[Football-Data](https://www.football-data.co.uk) Ligue 1 results, combines them
-with the MPP quotations, picks the score with the highest expected points, and
-writes it to the MPP `general` contest.
+[Mon Petit Prono](https://mpp.football). It converts market odds from
+[The Odds API](https://the-odds-api.com) into expected goals, falls back to its
+own Elo ratings computed from
+[Football-Data](https://www.football-data.co.uk) Ligue 1 results, combines the
+probabilities with the MPP quotations, picks the score with the highest
+expected points, and writes it to the MPP `general` contest.
 
 ## Quick start
 
 ```bash
-cp .env.example .env   # set MPP_TOKEN
+cp .env.example .env   # set MPP_TOKEN and ODDS_API_KEY
 cargo run -- list      # fixtures and quotations
 cargo run -- once      # one daily pass (dry-run by default)
 ```
@@ -29,16 +31,18 @@ state path/volume.
 
 ## Configuration
 
-| Variable     | Default        | Description                                  |
-| ------------ | -------------- | -------------------------------------------- |
-| `MPP_TOKEN`  | —              | Auth0 token for the MPP app API.             |
-| `WRITE`      | `false`        | Set to `true` to submit predictions.         |
-| `DAILY_HOUR` | `7`            | Hour of the daily MPP fetch (Europe/Paris).  |
-| `STATE_PATH` | `./state.json` | State file (Docker uses `/data/state.json`). |
-| `LOG_LEVEL`  | `INFO`         | `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`.   |
+| Variable       | Default        | Description                                  |
+| -------------- | -------------- | -------------------------------------------- |
+| `MPP_TOKEN`    | —              | Auth0 token for the MPP app API.             |
+| `ODDS_API_KEY` | —              | The Odds API key for Ligue 1 odds.           |
+| `WRITE`        | `false`        | Set to `true` to submit predictions.         |
+| `DAILY_HOUR`   | `7`            | Hour of the daily MPP fetch (Europe/Paris).  |
+| `STATE_PATH`   | `./state.json` | State file (Docker uses `/data/state.json`). |
+| `LOG_LEVEL`    | `INFO`         | `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`.   |
 
-`MPP_TOKEN` authenticates MPP Autopilot against the MPP app. `WRITE=false` runs
-the whole pipeline without submitting anything.
+`MPP_TOKEN` authenticates MPP Autopilot against the MPP app. `ODDS_API_KEY` is
+required: the service refuses to start without it. `WRITE=false` runs the whole
+pipeline without submitting anything.
 
 ## Commands
 
