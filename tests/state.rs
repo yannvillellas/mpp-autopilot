@@ -4,8 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use chrono::{DateTime, Duration, TimeZone, Utc};
-use mpp_autopilot::elo::EloRatings;
+use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
+use mpp_autopilot::elo::{EloRatings, MatchResult};
 use mpp_autopilot::model::Score;
 use mpp_autopilot::state::{MatchState, Mode, State, StateError, Trigger};
 
@@ -121,7 +121,59 @@ fn elo_cache_uses_a_readable_state_schema() {
     let json = serde_json::to_value(&state).expect("serialize state");
 
     assert_eq!(json["elo"]["fetched_at"], "2026-10-19T05:00:00Z");
-    assert_eq!(json["elo"]["ratings"]["paris sg"], 1900.0);
+    assert_eq!(json["elo"]["ratings"]["psg"], 1900.0);
+    assert!(json["elo"].get("applied").is_none());
+    assert!(json["elo"].get("backfilled_through").is_none());
+}
+
+#[test]
+fn elo_cache_keeps_applied_matches_across_load() {
+    let dir = TestDir::new();
+    let path = dir.state_path();
+    let outcome = MatchResult {
+        season: 2026,
+        date: NaiveDate::from_ymd_opt(2026, 10, 17).expect("valid date"),
+        home: "Paris SG".to_owned(),
+        away: "Marseille".to_owned(),
+        home_goals: 1,
+        away_goals: 1,
+    };
+    let mut ratings = EloRatings::from_pairs([("Paris SG", 1800.0), ("Marseille", 1700.0)]);
+    assert_eq!(ratings.apply_results([outcome.clone()]), 1);
+    let expected = ratings.clone();
+
+    let mut state = State::new(Mode::Write);
+    state.record_elo(ratings, at(19, 5));
+    state.save(&path).expect("save state");
+
+    let loaded = State::load(&path, Mode::Write).expect("load state");
+    let mut restored = loaded.cached_elo();
+
+    assert_eq!(restored, expected);
+    assert_eq!(restored.apply_results([outcome]), 0);
+    assert_eq!(restored, expected);
+}
+
+#[test]
+fn legacy_clubelo_rating_keys_still_answer_canonical_lookups() {
+    let json = r#"{
+      "mode": "dry",
+      "matches": {},
+      "elo": {
+        "fetched_at": "2026-10-19T05:00:00Z",
+        "ratings": {
+          "paris sg": 1900.0,
+          "marseille": 1700.0
+        }
+      }
+    }"#;
+
+    let state: State = serde_json::from_str(json).expect("parse legacy Elo state");
+    let cached = state.elo.as_ref().expect("cached ratings");
+
+    assert_eq!(cached.ratings.rating("PSG"), Some(1900.0));
+    assert_eq!(state.cached_elo().rating("PSG"), Some(1900.0));
+    assert_eq!(state.cached_elo().rating("Marseille"), Some(1700.0));
 }
 
 #[test]

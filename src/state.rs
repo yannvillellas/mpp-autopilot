@@ -1,6 +1,6 @@
 //! Persistent state for match triggers, submitted scores and the Elo cache.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -51,14 +51,14 @@ impl Trigger {
     pub const ALL: [Self; 3] = [Self::Publish, Self::T60, Self::T5];
 }
 
-/// Persisted state shared by all matches and the ClubElo cache.
+/// Persisted state shared by all matches and the Elo cache.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct State {
     /// Last execution mode.
     pub mode: Mode,
     /// Match state, keyed by MPP match id.
     pub matches: BTreeMap<String, MatchState>,
-    /// Last successfully fetched ClubElo ratings.
+    /// Last successfully fetched Elo ratings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elo: Option<CachedElo>,
 }
@@ -73,12 +73,26 @@ impl State {
         }
     }
 
-    /// Records the ratings from a successful ClubElo fetch.
-    pub fn record_elo(&mut self, ratings: EloRatings, at: DateTime<Utc>) {
+    /// Records the ratings from a successful source fetch.
+    pub fn record_elo(&mut self, mut ratings: EloRatings, at: DateTime<Utc>) {
+        let applied = std::mem::take(&mut ratings.applied);
+        let backfilled_through = ratings.backfilled_through.take();
         self.elo = Some(CachedElo {
             fetched_at: at,
             ratings,
+            applied,
+            backfilled_through,
         });
+    }
+
+    /// Returns the cached ratings with their incremental-update progress.
+    ///
+    /// Returns empty ratings when no successful fetch has been recorded.
+    pub fn cached_elo(&self) -> EloRatings {
+        self.elo
+            .as_ref()
+            .map(CachedElo::restore_ratings)
+            .unwrap_or_default()
     }
 
     /// Loads the state file, or starts fresh when it does not exist.
@@ -144,13 +158,30 @@ impl State {
     }
 }
 
-/// Last successfully fetched ClubElo ratings.
+/// Last successfully fetched Elo ratings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CachedElo {
     /// Time of the fetch that produced these ratings.
     pub fetched_at: DateTime<Utc>,
     /// Ratings indexed by normalized club name.
     pub ratings: EloRatings,
+    /// Matches already applied to the ratings, keyed by season, date and clubs.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    applied: BTreeSet<String>,
+    /// Last season whose CSV was downloaded, as a start year.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    backfilled_through: Option<u16>,
+}
+
+impl CachedElo {
+    /// Restores the ratings together with the progress needed for an
+    /// incremental update.
+    pub fn restore_ratings(&self) -> EloRatings {
+        let mut ratings = self.ratings.clone();
+        ratings.applied = self.applied.clone();
+        ratings.backfilled_through = self.backfilled_through;
+        ratings
+    }
 }
 
 /// Persisted state for one match.

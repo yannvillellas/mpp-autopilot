@@ -82,7 +82,11 @@ the project overview.
   scheduled triggers. In write mode, each trigger reads the forecast back
   before writing.
 - `WRITE=false` by default; writing is opt-in.
-- A failed ClubElo fetch reuses the last successful ratings, logged with their
+- Elo ratings are computed from Football-Data.co.uk Ligue 1 results. The
+  archive is backfilled from 2020/21 once, then each pass applies only new
+  results; the applied matches and the last downloaded season are persisted in
+  the state.
+- A failed ratings fetch reuses the last successful ratings, logged with their
   age. Without a cached snapshot, the trigger pass fails.
 - State is persisted atomically. A wrong score is worse than a redundant
   write: never skip a write merely because a previous write is recorded, and

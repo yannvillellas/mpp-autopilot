@@ -8,9 +8,9 @@
 //! missing score is worse than a redundant PATCH.
 //! The persistent state remains the scheduler memory: which triggers already
 //! ran, the kickoff of each match, and an audit trail of what the bot wrote.
-//! It also keeps the last successful ClubElo ratings, so a fetch failure does
-//! not drop the whole pass; ratings reused from that cache are logged with
-//! their age.
+//! It also keeps the last successful Elo ratings, so a fetch failure does not
+//! drop the whole pass; ratings reused from that cache are logged with their
+//! age.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -64,8 +64,8 @@ pub enum RunError {
     /// MPP request or parsing failure.
     #[error("MPP error: {0}")]
     Mpp(#[from] MppError),
-    /// ClubElo request or parsing failure.
-    #[error("ClubElo error: {0}")]
+    /// Elo ratings request or parsing failure.
+    #[error("Elo ratings error: {0}")]
     Elo(#[from] EloError),
     /// State persistence failure.
     #[error("state error: {0}")]
@@ -73,9 +73,9 @@ pub enum RunError {
     /// A trigger pass ran before any daily snapshot was loaded.
     #[error("daily snapshot required before a trigger pass")]
     MissingSnapshot,
-    /// Cached ClubElo ratings do not cover a fixture, so a fresh fetch is
-    /// required before the trigger can be consumed.
-    #[error("cached ClubElo ratings are missing a club rating")]
+    /// Cached Elo ratings do not cover a fixture, so a fresh fetch is required
+    /// before the trigger can be consumed.
+    #[error("cached Elo ratings are missing a club rating")]
     CachedEloIncomplete,
 }
 
@@ -282,7 +282,7 @@ impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E> {
                         trigger = ?trigger,
                         home = %fixture.home.name,
                         away = %fixture.away.name,
-                        "missing ClubElo rating in the cached snapshot; trigger left pending"
+                        "missing Elo rating in the cached snapshot; trigger left pending"
                     );
                     if first_error.is_none() {
                         first_error = Some(RunError::CachedEloIncomplete);
@@ -295,7 +295,7 @@ impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E> {
                     trigger = ?trigger,
                     home = %fixture.home.name,
                     away = %fixture.away.name,
-                    "missing ClubElo rating; trigger marked without write"
+                    "missing Elo rating; trigger marked without write"
                 );
                 self.mark_trigger(&match_id, trigger, now)?;
                 report.triggers += 1;
@@ -482,8 +482,8 @@ impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E> {
         Ok(report)
     }
 
-    /// Fetches the ClubElo ratings, reusing the last successful snapshot when
-    /// the fetch fails.
+    /// Fetches the Elo ratings, reusing the last successful snapshot when the
+    /// fetch fails.
     async fn ratings(
         &mut self,
         now: DateTime<Utc>,
@@ -512,7 +512,7 @@ impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E> {
                     fetched_at = %cached.fetched_at,
                     age_seconds,
                     ratings = cached.ratings.len(),
-                    "ClubElo fetch failed; using the last successful ratings"
+                    "Elo ratings fetch failed; using the last successful ratings"
                 );
                 Ok((
                     cached.ratings.clone(),

@@ -1,6 +1,6 @@
 //! Club-name normalization and provider aliases.
 
-use mpp_autopilot::teams::{CANONICAL_CLUBS, canonical_name, clubelo_name, normalize_name};
+use mpp_autopilot::teams::{CANONICAL_CLUBS, canonical_name, normalize_name};
 
 #[test]
 fn mpp_variants_map_to_canonical_names() {
@@ -32,10 +32,31 @@ fn mpp_variants_map_to_canonical_names() {
 }
 
 #[test]
+fn football_data_spellings_map_to_canonical_names() {
+    let cases = [
+        ("Ajaccio", "AC Ajaccio"),
+        ("Bordeaux", "Bordeaux"),
+        ("Clermont", "Clermont Foot"),
+        ("Dijon", "Dijon FCO"),
+        ("Metz", "FC Metz"),
+        ("Nantes", "FC Nantes"),
+        ("Montpellier", "Montpellier"),
+        ("Nimes", "Nimes"),
+        ("Reims", "Reims"),
+        ("St Etienne", "Saint-Etienne"),
+    ];
+
+    for (input, expected) in cases {
+        assert_eq!(canonical_name(input), Some(expected), "input: {input}");
+    }
+}
+
+#[test]
 fn aliases_compose_with_normalization() {
     assert_eq!(canonical_name("Paris Saint-Germain"), Some("PSG"));
     assert_eq!(canonical_name("Le Havre AC"), Some("Le Havre"));
     assert_eq!(canonical_name("Le Mans"), Some("Le Mans FC"));
+    assert_eq!(canonical_name("Saint-Etienne"), Some("Saint-Etienne"));
 }
 
 #[test]
@@ -56,23 +77,5 @@ fn normalization_folds_accents_case_hyphens_and_spaces() {
     assert_eq!(normalize_name("Paris Saint-Germain"), "paris saint germain");
     assert_eq!(normalize_name("Le   Havre"), "le havre");
     assert_eq!(normalize_name("AJ Auxerre"), "aj auxerre");
-}
-
-#[test]
-fn clubelo_names_follow_the_alias_table() {
-    assert_eq!(clubelo_name("AJ Auxerre"), Some("Auxerre"));
-    assert_eq!(clubelo_name("Le Mans FC"), Some("Le Mans"));
-    assert_eq!(clubelo_name("Lille OSC"), Some("Lille"));
-    assert_eq!(clubelo_name("PSG"), Some("Paris SG"));
-    assert_eq!(clubelo_name("RC Lens"), Some("Lens"));
-    assert_eq!(clubelo_name("Troyes AC"), Some("Troyes"));
-    assert_eq!(clubelo_name("Angers"), Some("Angers"));
-    assert_eq!(clubelo_name("Grenoble"), None);
-}
-
-#[test]
-fn every_canonical_club_has_a_clubelo_name() {
-    for club in CANONICAL_CLUBS {
-        assert!(clubelo_name(club).is_some(), "club: {club}");
-    }
+    assert_eq!(normalize_name("Saint-Étienne"), "saint etienne");
 }
