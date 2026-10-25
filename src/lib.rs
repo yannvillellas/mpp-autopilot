@@ -3,6 +3,8 @@
 //! The crate exposes the pure building blocks used by the `mpp-autopilot`
 //! binary.
 
+#[cfg(feature = "backtest")]
+pub mod backtest;
 pub mod cli;
 pub mod config;
 pub mod elo;

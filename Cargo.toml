@@ -6,6 +6,13 @@ rust-version = "1.85"
 description = "MPP Autopilot: autonomous Ligue 1 predictions for Mon Petit Prono"
 publish = false
 
+[features]
+backtest = []
+
+[[bin]]
+name = "backtest"
+required-features = ["backtest"]
+
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
