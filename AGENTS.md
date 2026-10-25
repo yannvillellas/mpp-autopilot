@@ -40,8 +40,8 @@ the project overview.
 - Avoid `panic!` on reachable runtime paths.
 - Typed errors with `thiserror` in modules, `anyhow` in `main`.
 - `tracing` for logs; no `println!` outside CLI output.
-- Keep network access isolated in `src/mpp.rs` (the MPP app client) and
-  `src/elo.rs`.
+- Keep network access isolated in `src/mpp.rs` (the MPP app client),
+  `src/elo.rs` (Football-Data) and `src/odds.rs` (The Odds API).
 - Smallest possible visibility (`pub(crate)` by default).
 - Document modules (`//!`) and public items (`///`).
 

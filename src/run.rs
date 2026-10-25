@@ -1,5 +1,8 @@
 //! Orchestration of the daily fetch, match triggers and MPP writes.
 //!
+//! Market odds are the primary prediction source. A fixture without a usable
+//! market quote falls back to Elo ratings, first fetched and then cached.
+//!
 //! Idempotence reads the forecast back from MPP before every write: a trigger
 //! writes only when the remote score differs from the model pick, so a manual
 //! edit in the app is overwritten at the next trigger and a crash between the
@@ -23,6 +26,7 @@ use tracing::{info, warn};
 use crate::elo::{EloError, EloRatings, EloSite};
 use crate::model::{self, Prediction, Score};
 use crate::mpp::{Fixture, MppApi, MppError, Snapshot};
+use crate::odds::{MarketForecast, NoOdds, OddsSite};
 use crate::scheduler;
 use crate::state::{MatchState, Mode, State, StateError, Trigger};
 use crate::teams;
@@ -92,9 +96,13 @@ impl RunError {
 }
 
 /// Runs daily fetches and match triggers against injected clients.
-pub struct Orchestrator<'a, M: MppApi, E: EloSite> {
+///
+/// A market source is optional so the Elo-only path stays testable. Production
+/// wiring always adds one with [`Self::with_market`].
+pub struct Orchestrator<'a, M: MppApi, E: EloSite, O: OddsSite = NoOdds> {
     mpp: &'a M,
     elo: &'a E,
+    market: Option<&'a O>,
     mode: Mode,
     state: State,
     state_path: PathBuf,
@@ -102,8 +110,8 @@ pub struct Orchestrator<'a, M: MppApi, E: EloSite> {
     snapshot_loaded: bool,
 }
 
-impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E> {
-    /// Builds an orchestrator from loaded state and clients.
+impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E, NoOdds> {
+    /// Builds an Elo-only orchestrator from loaded state and clients.
     ///
     /// The state mode is aligned with `mode`; a mode change resets triggers,
     /// as required by the persistent-state contract.
@@ -113,6 +121,7 @@ impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E> {
         Self {
             mpp,
             elo,
+            market: None,
             mode,
             state,
             state_path,
@@ -121,6 +130,22 @@ impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E> {
         }
     }
 
+    /// Adds the market odds source used before the Elo fallback.
+    pub fn with_market<O: OddsSite>(self, market: &'a O) -> Orchestrator<'a, M, E, O> {
+        Orchestrator {
+            mpp: self.mpp,
+            elo: self.elo,
+            market: Some(market),
+            mode: self.mode,
+            state: self.state,
+            state_path: self.state_path,
+            fixtures: self.fixtures,
+            snapshot_loaded: self.snapshot_loaded,
+        }
+    }
+}
+
+impl<'a, M: MppApi, E: EloSite, O: OddsSite> Orchestrator<'a, M, E, O> {
     /// Current persistent state.
     pub fn state(&self) -> &State {
         &self.state
@@ -242,7 +267,32 @@ impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E> {
             return Ok(report);
         }
 
-        let (ratings, ratings_source) = self.ratings(now).await?;
+        let market = match self.market {
+            Some(market) => match market.fetch_forecasts().await {
+                Ok(forecasts) => forecasts,
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        "market odds unavailable; falling back to Elo ratings"
+                    );
+                    Vec::new()
+                }
+            },
+            None => Vec::new(),
+        };
+
+        let mut ratings_error: Option<RunError> = None;
+        let ratings = match self.ratings(now).await {
+            Ok(ratings) => Some(ratings),
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    "Elo ratings unavailable; market odds will be used where available"
+                );
+                ratings_error = Some(error);
+                None
+            }
+        };
         let mut first_error: Option<RunError> = None;
 
         for (match_id, trigger, fixture) in ready {
@@ -272,64 +322,112 @@ impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E> {
                 continue;
             };
 
-            let (Some(home_elo), Some(away_elo)) = (
-                ratings.rating(home_canonical),
-                ratings.rating(away_canonical),
-            ) else {
-                if ratings_source.is_cached() {
+            let market_prediction =
+                find_market_forecast(&market, &fixture, home_canonical, away_canonical).and_then(
+                    |forecast| match model::predict_from_lambdas(forecast.lambdas, fixture.odds) {
+                        Ok(prediction) => Some((
+                            prediction,
+                            ForecastSource::Market {
+                                observed_at: forecast.observed_at,
+                            },
+                        )),
+                        Err(error) => {
+                            warn!(
+                                match_id = %match_id,
+                                trigger = ?trigger,
+                                error = %error,
+                                "market odds could not produce a prediction; falling back to Elo"
+                            );
+                            None
+                        }
+                    },
+                );
+
+            let (prediction, elo, source) = if let Some((prediction, source)) = market_prediction {
+                (prediction, None, source)
+            } else {
+                let Some((ratings, ratings_source)) = ratings.as_ref() else {
                     warn!(
                         match_id = %match_id,
                         trigger = ?trigger,
                         home = %fixture.home.name,
                         away = %fixture.away.name,
-                        "missing Elo rating in the cached snapshot; trigger left pending"
+                        "no market odds and no Elo ratings; trigger left pending"
                     );
                     if first_error.is_none() {
-                        first_error = Some(RunError::CachedEloIncomplete);
+                        first_error = ratings_error.take();
                     }
                     continue;
-                }
+                };
 
-                warn!(
-                    match_id = %match_id,
-                    trigger = ?trigger,
-                    home = %fixture.home.name,
-                    away = %fixture.away.name,
-                    "missing Elo rating; trigger marked without write"
-                );
-                self.mark_trigger(&match_id, trigger, now)?;
-                report.triggers += 1;
-                report.skipped += 1;
-                continue;
-            };
+                let (Some(home_elo), Some(away_elo)) = (
+                    ratings.rating(home_canonical),
+                    ratings.rating(away_canonical),
+                ) else {
+                    if ratings_source.is_cached() {
+                        warn!(
+                            match_id = %match_id,
+                            trigger = ?trigger,
+                            home = %fixture.home.name,
+                            away = %fixture.away.name,
+                            "missing Elo rating in the cached snapshot; trigger left pending"
+                        );
+                        if first_error.is_none() {
+                            first_error = Some(RunError::CachedEloIncomplete);
+                        }
+                        continue;
+                    }
 
-            let prediction = match model::predict(home_elo, away_elo, fixture.odds) {
-                Ok(prediction) => prediction,
-                Err(error) => {
                     warn!(
                         match_id = %match_id,
                         trigger = ?trigger,
-                        error = %error,
-                        "model could not compute a prediction; trigger marked without write"
+                        home = %fixture.home.name,
+                        away = %fixture.away.name,
+                        "missing Elo rating; trigger marked without write"
                     );
                     self.mark_trigger(&match_id, trigger, now)?;
                     report.triggers += 1;
                     report.skipped += 1;
                     continue;
-                }
+                };
+
+                let prediction = match model::predict(home_elo, away_elo, fixture.odds) {
+                    Ok(prediction) => prediction,
+                    Err(error) => {
+                        warn!(
+                            match_id = %match_id,
+                            trigger = ?trigger,
+                            error = %error,
+                            "model could not compute a prediction; trigger marked without write"
+                        );
+                        self.mark_trigger(&match_id, trigger, now)?;
+                        report.triggers += 1;
+                        report.skipped += 1;
+                        continue;
+                    }
+                };
+
+                (
+                    prediction,
+                    Some(MatchElo {
+                        home: home_elo,
+                        away: away_elo,
+                    }),
+                    ForecastSource::Elo {
+                        observed_at: ratings_source.observed_at(now),
+                        ratings: *ratings_source,
+                    },
+                )
             };
 
             if self.mode == Mode::Dry {
                 log_trigger(
                     &fixture,
                     trigger,
-                    MatchElo {
-                        home: home_elo,
-                        away: away_elo,
-                    },
+                    elo,
                     &prediction,
                     RemoteForecast::NotRead,
-                    ratings_source,
+                    source,
                     "dry_run",
                 );
                 self.mark_trigger(&match_id, trigger, now)?;
@@ -356,13 +454,10 @@ impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E> {
                 log_trigger(
                     &fixture,
                     trigger,
-                    MatchElo {
-                        home: home_elo,
-                        away: away_elo,
-                    },
+                    elo,
                     &prediction,
                     remote,
-                    ratings_source,
+                    source,
                     "unchanged",
                 );
                 self.mark_trigger(&match_id, trigger, now)?;
@@ -406,13 +501,10 @@ impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E> {
                     log_trigger(
                         &fixture,
                         trigger,
-                        MatchElo {
-                            home: home_elo,
-                            away: away_elo,
-                        },
+                        elo,
                         &prediction,
                         remote,
-                        ratings_source,
+                        source,
                         "written",
                     );
                     self.state.save(&self.state_path)?;
@@ -423,13 +515,10 @@ impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E> {
                     log_trigger(
                         &fixture,
                         trigger,
-                        MatchElo {
-                            home: home_elo,
-                            away: away_elo,
-                        },
+                        elo,
                         &prediction,
                         remote,
-                        ratings_source,
+                        source,
                         "write_failed",
                     );
                     warn!(
@@ -453,13 +542,10 @@ impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E> {
                     log_trigger(
                         &fixture,
                         trigger,
-                        MatchElo {
-                            home: home_elo,
-                            away: away_elo,
-                        },
+                        elo,
                         &prediction,
                         remote,
-                        ratings_source,
+                        source,
                         "write_failed",
                     );
                     warn!(
@@ -516,7 +602,10 @@ impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E> {
                 );
                 Ok((
                     cached.ratings.clone(),
-                    RatingsSource::Cached { age_seconds },
+                    RatingsSource::Cached {
+                        fetched_at: cached.fetched_at,
+                        age_seconds,
+                    },
                 ))
             }
         }
@@ -585,6 +674,33 @@ struct MatchElo {
     away: f64,
 }
 
+/// Maximum kickoff difference accepted when matching an odds event.
+const MARKET_KICKOFF_TOLERANCE_SECS: i64 = 6 * 60 * 60;
+
+/// Finds the market forecast of a fixture by canonical clubs and kickoff.
+fn find_market_forecast<'a>(
+    forecasts: &'a [MarketForecast],
+    fixture: &Fixture,
+    home: &'static str,
+    away: &'static str,
+) -> Option<&'a MarketForecast> {
+    forecasts
+        .iter()
+        .filter(|forecast| {
+            let difference = (forecast.commence_time - fixture.kickoff)
+                .num_seconds()
+                .abs();
+            teams::canonical_name(&forecast.home_team) == Some(home)
+                && teams::canonical_name(&forecast.away_team) == Some(away)
+                && difference <= MARKET_KICKOFF_TOLERANCE_SECS
+        })
+        .min_by_key(|forecast| {
+            (forecast.commence_time - fixture.kickoff)
+                .num_seconds()
+                .abs()
+        })
+}
+
 /// Origin of the Elo ratings used by a trigger pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RatingsSource {
@@ -592,6 +708,8 @@ enum RatingsSource {
     Fresh,
     /// Reused from the last successful fetch.
     Cached {
+        /// Time of the fetch that produced the snapshot.
+        fetched_at: DateTime<Utc>,
         /// Snapshot age at the start of the pass.
         age_seconds: i64,
     },
@@ -602,17 +720,63 @@ impl RatingsSource {
         matches!(self, Self::Cached { .. })
     }
 
-    fn label(self) -> &'static str {
-        match self {
-            Self::Fresh => "fresh",
-            Self::Cached { .. } => "cache",
-        }
-    }
-
     fn age_seconds(self) -> i64 {
         match self {
             Self::Fresh => 0,
-            Self::Cached { age_seconds } => age_seconds,
+            Self::Cached { age_seconds, .. } => age_seconds,
+        }
+    }
+
+    fn observed_at(self, now: DateTime<Utc>) -> DateTime<Utc> {
+        match self {
+            Self::Fresh => now,
+            Self::Cached { fetched_at, .. } => fetched_at,
+        }
+    }
+}
+
+/// Source of the prediction used for one trigger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForecastSource {
+    /// Market odds fetched during this pass.
+    Market {
+        /// Odds observation time reported by the selected bookmaker.
+        observed_at: DateTime<Utc>,
+    },
+    /// Elo ratings, fresh or reused from the persisted cache.
+    Elo {
+        /// Observation time of the ratings.
+        observed_at: DateTime<Utc>,
+        /// Fresh or cached ratings.
+        ratings: RatingsSource,
+    },
+}
+
+impl ForecastSource {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Market { .. } => "market",
+            Self::Elo {
+                ratings: RatingsSource::Fresh,
+                ..
+            } => "elo",
+            Self::Elo {
+                ratings: RatingsSource::Cached { .. },
+                ..
+            } => "elo_cached",
+        }
+    }
+
+    fn observed_at(self) -> DateTime<Utc> {
+        match self {
+            Self::Market { observed_at } | Self::Elo { observed_at, .. } => observed_at,
+        }
+    }
+
+    fn elo_age_seconds(self) -> i64 {
+        match self {
+            Self::Market { .. } => 0,
+            Self::Elo { ratings, .. } => ratings.age_seconds(),
         }
     }
 }
@@ -620,10 +784,10 @@ impl RatingsSource {
 fn log_trigger(
     fixture: &Fixture,
     trigger: Trigger,
-    elo: MatchElo,
+    elo: Option<MatchElo>,
     prediction: &Prediction,
     remote: RemoteForecast,
-    ratings: RatingsSource,
+    source: ForecastSource,
     status: &'static str,
 ) {
     info!(
@@ -632,8 +796,8 @@ fn log_trigger(
         away = %fixture.away.name,
         kickoff = %fixture.kickoff,
         trigger = ?trigger,
-        home_elo = elo.home,
-        away_elo = elo.away,
+        home_elo = elo.map(|elo| elo.home),
+        away_elo = elo.map(|elo| elo.away),
         odds_home = fixture.odds.home,
         odds_draw = fixture.odds.draw,
         odds_away = fixture.odds.away,
@@ -648,8 +812,9 @@ fn log_trigger(
         recommendation = ?prediction.recommendation,
         recommendation_ev = prediction.recommendation_ev,
         remote = %remote,
-        elo_source = ratings.label(),
-        elo_age_seconds = ratings.age_seconds(),
+        source = source.label(),
+        observed_at = %source.observed_at(),
+        elo_age_seconds = source.elo_age_seconds(),
         status,
         "MPP trigger"
     );
@@ -683,15 +848,40 @@ mod tests {
 
     #[test]
     fn ratings_source_reports_freshness() {
-        assert_eq!(RatingsSource::Fresh.label(), "fresh");
+        let fetched_at = "2026-10-19T04:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("valid timestamp");
+        let cached = RatingsSource::Cached {
+            fetched_at,
+            age_seconds: 3_600,
+        };
+
         assert_eq!(RatingsSource::Fresh.age_seconds(), 0);
-        assert_eq!(
-            RatingsSource::Cached { age_seconds: 3_600 }.label(),
-            "cache"
-        );
-        assert_eq!(
-            RatingsSource::Cached { age_seconds: 3_600 }.age_seconds(),
-            3_600
-        );
+        assert_eq!(cached.age_seconds(), 3_600);
+        assert_eq!(cached.observed_at(fetched_at), fetched_at);
+    }
+
+    #[test]
+    fn forecast_source_labels_market_and_cached_elo() {
+        let observed_at = "2026-10-19T04:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("valid timestamp");
+        let market = ForecastSource::Market { observed_at };
+        let fresh = ForecastSource::Elo {
+            observed_at,
+            ratings: RatingsSource::Fresh,
+        };
+        let cached = ForecastSource::Elo {
+            observed_at,
+            ratings: RatingsSource::Cached {
+                fetched_at: observed_at,
+                age_seconds: 3_600,
+            },
+        };
+
+        assert_eq!(market.label(), "market");
+        assert_eq!(fresh.label(), "elo");
+        assert_eq!(cached.label(), "elo_cached");
+        assert_eq!(cached.observed_at(), observed_at);
     }
 }

@@ -11,6 +11,7 @@ use mpp_autopilot::cli::{self, Action, Command};
 use mpp_autopilot::config::{self, Config};
 use mpp_autopilot::elo::{EloRatings, FootballDataClient};
 use mpp_autopilot::mpp::{MppApi, MppClient};
+use mpp_autopilot::odds::OddsApiClient;
 use mpp_autopilot::service;
 use mpp_autopilot::state::{Mode, State};
 use tracing::{Level, info, warn};
@@ -96,6 +97,8 @@ fn check(config: &Config, mode: Mode) -> Result<()> {
     let _mpp = MppClient::new(config.mpp_token.clone()).context("failed to build MPP client")?;
     let _elo = FootballDataClient::new(EloRatings::default())
         .context("failed to build Football-Data client")?;
+    let _market = OddsApiClient::new(config.odds_api_key.clone())
+        .context("failed to build The Odds API client")?;
 
     if let Some(parent) = config.state_path.parent() {
         if !parent.as_os_str().is_empty() && !parent.exists() {
@@ -185,6 +188,8 @@ async fn once(config: &Config, mode: Mode) -> Result<()> {
         .with_context(|| format!("failed to load state {}", config.state_path.display()))?;
     let elo = FootballDataClient::new(state.cached_elo())
         .context("failed to build Football-Data client")?;
+    let market = OddsApiClient::new(config.odds_api_key.clone())
+        .context("failed to build The Odds API client")?;
 
     let report = service::run_once(
         mode,
@@ -192,6 +197,7 @@ async fn once(config: &Config, mode: Mode) -> Result<()> {
         config.state_path.clone(),
         &mpp,
         &elo,
+        &market,
         Utc::now(),
     )
     .await
@@ -215,6 +221,8 @@ async fn run_service(config: &Config, mode: Mode) -> Result<()> {
         .with_context(|| format!("failed to load state {}", config.state_path.display()))?;
     let elo = FootballDataClient::new(state.cached_elo())
         .context("failed to build Football-Data client")?;
+    let market = OddsApiClient::new(config.odds_api_key.clone())
+        .context("failed to build The Odds API client")?;
 
     service::run_forever(
         mode,
@@ -223,6 +231,7 @@ async fn run_service(config: &Config, mode: Mode) -> Result<()> {
         config.state_path.clone(),
         &mpp,
         &elo,
+        &market,
     )
     .await
     .context("service loop failed")?;

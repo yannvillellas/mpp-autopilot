@@ -13,6 +13,7 @@ use tracing::{info, warn};
 
 use crate::elo::EloSite;
 use crate::mpp::MppApi;
+use crate::odds::OddsSite;
 use crate::retry::RetryPolicy;
 use crate::run::{Orchestrator, RunError, RunReport};
 use crate::scheduler::{self, MAX_WAKE_INTERVAL, SchedulerError};
@@ -27,15 +28,16 @@ pub enum ServiceError {
 }
 
 /// Runs one daily fetch and all due triggers.
-pub async fn run_once<M: MppApi, E: EloSite>(
+pub async fn run_once<M: MppApi, E: EloSite, O: OddsSite>(
     mode: Mode,
     state: State,
     state_path: PathBuf,
     mpp: &M,
     elo: &E,
+    market: &O,
     now: DateTime<Utc>,
 ) -> Result<RunReport, RunError> {
-    let mut orchestrator = Orchestrator::new(mpp, elo, mode, state, state_path);
+    let mut orchestrator = Orchestrator::new(mpp, elo, mode, state, state_path).with_market(market);
     orchestrator.execute_once(now).await
 }
 
@@ -43,15 +45,16 @@ pub async fn run_once<M: MppApi, E: EloSite>(
 ///
 /// Daily and trigger retries are independent, so a failed daily fetch no
 /// longer blocks trigger passes when a previous snapshot is available.
-pub async fn run_forever<M: MppApi, E: EloSite>(
+pub async fn run_forever<M: MppApi, E: EloSite, O: OddsSite>(
     mode: Mode,
     daily_hour: u8,
     state: State,
     state_path: PathBuf,
     mpp: &M,
     elo: &E,
+    market: &O,
 ) -> Result<(), ServiceError> {
-    let mut orchestrator = Orchestrator::new(mpp, elo, mode, state, state_path);
+    let mut orchestrator = Orchestrator::new(mpp, elo, mode, state, state_path).with_market(market);
     let mut schedule = LoopSchedule::new(Utc::now(), daily_hour)?;
     let shutdown = Shutdown::install();
 

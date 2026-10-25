@@ -127,7 +127,7 @@ impl OutcomeProbabilities {
 /// Complete model result for one fixture.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Prediction {
-    /// Expected goals derived from the Elo ratings.
+    /// Expected goals used by the model.
     pub lambdas: Lambdas,
     /// Probabilities of the three outcomes.
     pub outcomes: OutcomeProbabilities,
@@ -149,6 +149,9 @@ pub enum ModelError {
     /// Elo ratings are not finite or produce invalid goal rates.
     #[error("Elo ratings must be finite and produce positive goal rates")]
     InvalidElo,
+    /// Expected goals are not finite and strictly positive.
+    #[error("expected goals must be finite and strictly positive")]
+    InvalidLambdas,
     /// Quotations are not finite and strictly positive.
     #[error("quotations must be finite and strictly positive")]
     InvalidQuotations,
@@ -185,7 +188,7 @@ pub fn lambdas(elo_home: f64, elo_away: f64) -> Result<Lambdas, ModelError> {
     }
 }
 
-/// Computes the expected-points model for one fixture.
+/// Computes the expected-points model for one fixture from Elo ratings.
 ///
 /// Ties are resolved in favour of the first score in row-major order
 /// (home goals, then away goals) and, for the recommendation, in the order
@@ -193,6 +196,32 @@ pub fn lambdas(elo_home: f64, elo_away: f64) -> Result<Lambdas, ModelError> {
 pub fn predict(elo_home: f64, elo_away: f64, odds: Odds) -> Result<Prediction, ModelError> {
     odds.validate()?;
     let lambdas = lambdas(elo_home, elo_away)?;
+    build_prediction(lambdas, odds)
+}
+
+/// Computes the expected-points model for one fixture from expected goals.
+///
+/// This is the same scoring model as [`predict`], for sources that produce
+/// expected goals directly, such as market odds.
+pub fn predict_from_lambdas(lambdas: Lambdas, odds: Odds) -> Result<Prediction, ModelError> {
+    odds.validate()?;
+    validate_lambdas(lambdas)?;
+    build_prediction(lambdas, odds)
+}
+
+fn validate_lambdas(lambdas: Lambdas) -> Result<(), ModelError> {
+    let valid = lambdas.home.is_finite()
+        && lambdas.away.is_finite()
+        && lambdas.home > 0.0
+        && lambdas.away > 0.0;
+    if valid {
+        Ok(())
+    } else {
+        Err(ModelError::InvalidLambdas)
+    }
+}
+
+fn build_prediction(lambdas: Lambdas, odds: Odds) -> Result<Prediction, ModelError> {
     let matrix = score_matrix(lambdas)?;
     let outcomes = outcome_probabilities(&matrix);
 
