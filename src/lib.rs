@@ -8,6 +8,7 @@ pub mod config;
 pub mod elo;
 pub mod model;
 pub mod mpp;
+pub mod odds;
 pub mod retry;
 pub mod run;
 pub mod scheduler;
