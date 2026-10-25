@@ -82,6 +82,8 @@ the project overview.
   scheduled triggers. In write mode, each trigger reads the forecast back
   before writing.
 - `WRITE=false` by default; writing is opt-in.
+- A failed ClubElo fetch reuses the last successful ratings, logged with their
+  age. Without a cached snapshot, the trigger pass fails.
 - State is persisted atomically. A wrong score is worse than a redundant
   write: never skip a write merely because a previous write is recorded, and
   write anyway when the forecast read fails.
