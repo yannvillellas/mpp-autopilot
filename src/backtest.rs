@@ -15,7 +15,15 @@
 //! Metrics are the mean exact-score log-loss, the mean 1X2 log-loss and the
 //! exact-score hit rate. Historical MPP quotations are not published, so the
 //! configuration's own 1X2 prices stand in for them when the model picks an
-//! exact score; this affects only the hit column.
+//! exact score (the average closing price when the row is Elo); this affects
+//! only the hit column. The production score grid
+//! stops at [`crate::model::MAX_GOALS`], so a rarer score is evaluated at the
+//! grid's last bucket to keep the log-loss finite; the hit column still
+//! compares the real score.
+//!
+//! The reference check reads `backtest-reference.json`, which the first full
+//! run writes. A configuration that is no longer present in the archive is
+//! skipped rather than failing the check, so a bookmaker can disappear.
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -49,6 +57,8 @@ pub const EVALUATION_TO_SEASON: u16 = 2025;
 /// Absolute tolerance applied to every metric by [`check`].
 pub const TOLERANCE: f64 = 1e-3;
 
+const REFERENCE_VERSION: u32 = 1;
+
 /// Run options selected on the command line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
@@ -78,15 +88,18 @@ pub enum Configuration {
     MaxClosing,
     /// Pinnacle pre-closing 1X2 and pre-closing total.
     PinnaclePreClosing,
+    /// The bot's own Elo rating path.
+    Elo,
 }
 
 impl Configuration {
     /// Every configuration reported by the harness.
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::PinnacleClosing,
         Self::AverageClosing,
         Self::MaxClosing,
         Self::PinnaclePreClosing,
+        Self::Elo,
     ];
 
     /// Stable identifier used in the reference file.
@@ -96,6 +109,7 @@ impl Configuration {
             Self::AverageClosing => "average_closing",
             Self::MaxClosing => "max_closing",
             Self::PinnaclePreClosing => "pinnacle_pre_closing",
+            Self::Elo => "elo",
         }
     }
 
@@ -106,6 +120,7 @@ impl Configuration {
             Self::AverageClosing => "market / average closing",
             Self::MaxClosing => "market / best price closing",
             Self::PinnaclePreClosing => "market / pinnacle pre-closing",
+            Self::Elo => "Elo",
         }
     }
 
@@ -115,6 +130,7 @@ impl Configuration {
             Self::AverageClosing => odds.average_closing,
             Self::MaxClosing => odds.max_closing,
             Self::PinnaclePreClosing => odds.pinnacle_pre_closing,
+            Self::Elo => None,
         }
     }
 }
@@ -228,11 +244,211 @@ impl Report {
     }
 }
 
+/// Committed reference metrics, compared by [`check`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Reference {
+    /// Reference format version.
+    pub version: u32,
+    /// First evaluated season.
+    pub from_season: u16,
+    /// Last evaluated season.
+    pub to_season: u16,
+    /// Documented tolerance, in absolute metric points.
+    pub tolerance: f64,
+    /// Metrics per configuration, keyed by [`Configuration::key`].
+    pub configurations: BTreeMap<String, Metrics>,
+}
+
+impl Report {
+    /// Builds the reference that [`check`] compares against.
+    pub fn reference(&self) -> Reference {
+        Reference {
+            version: REFERENCE_VERSION,
+            from_season: EVALUATION_FROM_SEASON,
+            to_season: EVALUATION_TO_SEASON,
+            tolerance: TOLERANCE,
+            configurations: self
+                .configurations
+                .iter()
+                .map(|row| (row.configuration.key().to_owned(), row.metrics))
+                .collect(),
+        }
+    }
+
+    fn row(&self, key: &str) -> Option<&ConfigurationReport> {
+        self.configurations
+            .iter()
+            .find(|row| row.configuration.key() == key)
+    }
+}
+
+/// Result of a successful reference comparison.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckOutcome {
+    /// Number of configurations that were present and compared.
+    pub checked: usize,
+    /// Reference configurations absent from the report.
+    pub skipped: Vec<String>,
+}
+
+/// Error returned when the report does not match the reference.
+#[derive(Debug, Clone, PartialEq, Error)]
+pub enum CheckError {
+    /// The reference was produced by an incompatible version.
+    #[error("reference version {found} is not supported (expected {expected})")]
+    Version {
+        /// Version found in the file.
+        found: u32,
+        /// Version this binary understands.
+        expected: u32,
+    },
+    /// The reference was produced on another evaluation window.
+    #[error(
+        "reference window is {from_season}/{to_season}, expected {expected_from}/{expected_to}"
+    )]
+    Window {
+        /// First season in the reference.
+        from_season: u16,
+        /// Last season in the reference.
+        to_season: u16,
+        /// First season this binary evaluates.
+        expected_from: u16,
+        /// Last season this binary evaluates.
+        expected_to: u16,
+    },
+    /// The report has a different number of matches for a configuration.
+    #[error("configuration {key}: expected n={expected}, got n={actual}")]
+    Count {
+        /// Configuration key.
+        key: String,
+        /// Match count in the reference.
+        expected: usize,
+        /// Match count in the report.
+        actual: usize,
+    },
+    /// A metric moved beyond the tolerance.
+    #[error(
+        "configuration {key} {metric}: expected {expected:.6}, got {actual:.6} (tolerance {tolerance})"
+    )]
+    Metric {
+        /// Configuration key.
+        key: String,
+        /// Metric name.
+        metric: &'static str,
+        /// Reference value.
+        expected: f64,
+        /// Measured value.
+        actual: f64,
+        /// Allowed absolute difference.
+        tolerance: f64,
+    },
+    /// The report contains a configuration the reference does not know.
+    #[error("configuration {key} is not recorded in the reference")]
+    Unrecorded {
+        /// Configuration key.
+        key: String,
+    },
+}
+
+/// Reads the committed reference from `path`.
+pub fn read_reference(path: &Path) -> Result<Reference, Error> {
+    let body = fs::read_to_string(path).map_err(|source| Error::Data {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    Ok(serde_json::from_str(&body)?)
+}
+
+/// Writes the reference to `path`.
+pub fn write_reference(report: &Report, path: &Path) -> Result<(), Error> {
+    let mut body = serde_json::to_string_pretty(&report.reference())?;
+    body.push('\n');
+    fs::write(path, body).map_err(|source| Error::Data {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+/// Compares a report with the committed reference.
+///
+/// Configurations that disappeared from the report are skipped: this is what
+/// lets a bookmaker vanish from the archive without failing the harness. Any
+/// other difference, including a match count or a metric beyond [`TOLERANCE`],
+/// is an error.
+pub fn check(report: &Report, reference: &Reference) -> Result<CheckOutcome, CheckError> {
+    if reference.version != REFERENCE_VERSION {
+        return Err(CheckError::Version {
+            found: reference.version,
+            expected: REFERENCE_VERSION,
+        });
+    }
+    if reference.from_season != EVALUATION_FROM_SEASON
+        || reference.to_season != EVALUATION_TO_SEASON
+    {
+        return Err(CheckError::Window {
+            from_season: reference.from_season,
+            to_season: reference.to_season,
+            expected_from: EVALUATION_FROM_SEASON,
+            expected_to: EVALUATION_TO_SEASON,
+        });
+    }
+
+    let mut checked = 0;
+    let mut skipped = Vec::new();
+
+    for (key, expected) in &reference.configurations {
+        let Some(actual) = report.row(key) else {
+            skipped.push(key.clone());
+            continue;
+        };
+        if actual.metrics.n != expected.n {
+            return Err(CheckError::Count {
+                key: key.clone(),
+                expected: expected.n,
+                actual: actual.metrics.n,
+            });
+        }
+        for (metric, expected, actual) in [
+            ("exact", expected.exact, actual.metrics.exact),
+            ("1x2", expected.one_x_two, actual.metrics.one_x_two),
+            ("hit", expected.hit, actual.metrics.hit),
+        ] {
+            if !within_tolerance(expected, actual) {
+                return Err(CheckError::Metric {
+                    key: key.clone(),
+                    metric,
+                    expected,
+                    actual,
+                    tolerance: TOLERANCE,
+                });
+            }
+        }
+        checked += 1;
+    }
+
+    for row in &report.configurations {
+        if !reference
+            .configurations
+            .contains_key(row.configuration.key())
+        {
+            return Err(CheckError::Unrecorded {
+                key: row.configuration.key().to_owned(),
+            });
+        }
+    }
+
+    Ok(CheckOutcome { checked, skipped })
+}
+
+fn within_tolerance(expected: f64, actual: f64) -> bool {
+    (expected - actual).abs() <= TOLERANCE
+}
+
 /// Errors returned by the backtest.
 #[derive(Debug, Error)]
 pub enum Error {
     /// The Football-Data client could not be built.
-    #[error("failed to build the Football-Data client")]
+    #[error("failed to build the Football-Data client: {0}")]
     Client(#[source] EloError),
     /// A season could not be downloaded.
     #[error("failed to download the {season}/{} Football-Data season: {source}", season + 1)]
@@ -261,6 +477,9 @@ pub enum Error {
         #[source]
         source: EloError,
     },
+    /// The reference file is not valid JSON for the expected schema.
+    #[error("invalid reference JSON: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 struct SeasonFile {
@@ -336,32 +555,39 @@ fn build_report(files: Vec<SeasonFile>) -> Report {
         .into_iter()
         .map(|configuration| (configuration, Accumulator::default()))
         .collect();
+    let mut ratings = EloRatings::default();
     let mut evaluation: Option<DateRange> = None;
     let mut evaluation_matches = 0;
 
     for matched in matches {
-        if !in_evaluation(matched.result.season) {
-            continue;
+        if in_evaluation(matched.result.season) {
+            evaluation_matches += 1;
+            evaluation = Some(match evaluation {
+                Some(range) => DateRange {
+                    from: range.from.min(matched.result.date),
+                    to: range.to.max(matched.result.date),
+                },
+                None => DateRange {
+                    from: matched.result.date,
+                    to: matched.result.date,
+                },
+            });
+
+            for configuration in Configuration::ALL {
+                let accumulator = accumulators
+                    .get_mut(&configuration)
+                    .expect("every configuration is registered");
+                if configuration == Configuration::Elo {
+                    evaluate_elo(&ratings, matched, accumulator);
+                } else {
+                    evaluate_market(configuration, matched, accumulator);
+                }
+            }
         }
 
-        evaluation_matches += 1;
-        evaluation = Some(match evaluation {
-            Some(range) => DateRange {
-                from: range.from.min(matched.result.date),
-                to: range.to.max(matched.result.date),
-            },
-            None => DateRange {
-                from: matched.result.date,
-                to: matched.result.date,
-            },
-        });
-
-        for configuration in Configuration::ALL {
-            let accumulator = accumulators
-                .get_mut(&configuration)
-                .expect("every configuration is registered");
-            evaluate_market(configuration, matched, accumulator);
-        }
+        // The ratings move only after the match has been evaluated, so every
+        // prediction above used the ratings as they stood before it.
+        ratings.apply_results([matched.result.clone()]);
     }
 
     let configurations = Configuration::ALL
@@ -443,6 +669,32 @@ fn evaluate_market(
     accumulator.record(&prediction, &grid, actual_score(&matched.result));
 }
 
+fn evaluate_elo(ratings: &EloRatings, matched: &SeasonMatch, accumulator: &mut Accumulator) {
+    let (Some(home), Some(away)) = (
+        ratings.rating(&matched.result.home),
+        ratings.rating(&matched.result.away),
+    ) else {
+        // Production leaves a trigger pending when a club has no rating yet.
+        return;
+    };
+
+    let Ok(lambdas) = model::lambdas(home, away) else {
+        return;
+    };
+    let quotation = matched
+        .odds
+        .average_closing
+        .map_or_else(neutral_quotation, |odds| quotation(&odds));
+    let Ok(prediction) = model::predict_from_lambdas(lambdas, quotation) else {
+        return;
+    };
+    let Ok(grid) = model::score_matrix(lambdas) else {
+        return;
+    };
+
+    accumulator.record(&prediction, &grid, actual_score(&matched.result));
+}
+
 fn market_probabilities(odds: &MatchOdds) -> Option<(f64, f64)> {
     let implied_home = 1.0 / odds.home;
     let implied_draw = 1.0 / odds.draw;
@@ -467,6 +719,14 @@ fn quotation(odds: &MatchOdds) -> Odds {
         home: odds.home,
         draw: odds.draw,
         away: odds.away,
+    }
+}
+
+fn neutral_quotation() -> Odds {
+    Odds {
+        home: 1.0,
+        draw: 1.0,
+        away: 1.0,
     }
 }
 
@@ -554,15 +814,17 @@ mod tests {
         F1,17/08/2024,20:45,Brest,Marseille,1,5,3.3,3.6,2.1,2.07,1.75,3.16,3.5,2.15,2.0,1.80,3.4,3.7,2.2,2.1,1.72,3.2,3.55,2.2,1.95,1.85\r\n\
         F1,18/08/2024,20:45,Auxerre,Nice,2,1,3.0,3.3,2.35,1.94,1.88,2.97,3.25,2.4,1.9,1.9,3.1,3.4,2.45,1.96,1.86,3.05,3.3,2.4,1.92,1.9\r\n";
 
+    fn fixture_file(season: u16, csv: &str) -> SeasonFile {
+        SeasonFile {
+            season,
+            path: PathBuf::from(format!("fixture-{season}.csv")),
+            fingerprint: fingerprint(csv.as_bytes()),
+            matches: parse_season_matches(season, csv).expect("parse fixture"),
+        }
+    }
+
     fn fixture_report() -> Report {
-        let matches = parse_season_matches(2024, FIXTURE).expect("parse fixture");
-        let file = SeasonFile {
-            season: 2024,
-            path: PathBuf::from("fixture.csv"),
-            fingerprint: fingerprint(FIXTURE.as_bytes()),
-            matches,
-        };
-        build_report(vec![file])
+        build_report(vec![fixture_file(2024, FIXTURE)])
     }
 
     #[test]
@@ -594,14 +856,7 @@ mod tests {
     fn a_source_without_columns_is_omitted() {
         let csv = "Div,Date,HomeTeam,AwayTeam,FTHG,FTAG,AvgCH,AvgCD,AvgCA,AvgC>2.5,AvgC<2.5\n\
             F1,16/08/2024,Le Havre,Paris SG,1,4,7.3,4.9,1.37,1.69,2.13\n";
-        let matches = parse_season_matches(2024, csv).expect("parse fixture");
-        let file = SeasonFile {
-            season: 2024,
-            path: PathBuf::from("fixture.csv"),
-            fingerprint: fingerprint(csv.as_bytes()),
-            matches,
-        };
-        let report = build_report(vec![file]);
+        let report = build_report(vec![fixture_file(2024, csv)]);
 
         assert_eq!(report.configurations.len(), 1);
         assert_eq!(
@@ -609,6 +864,141 @@ mod tests {
             Configuration::AverageClosing
         );
         assert_eq!(report.configurations[0].metrics.n, 1);
+    }
+
+    const RESULTS_2023: &str =
+        "Div,Date,HomeTeam,AwayTeam,FTHG,FTAG\nF1,12/08/2023,Paris SG,FC Nantes,2,0\n";
+    const RESULTS_2024: &str =
+        "Div,Date,HomeTeam,AwayTeam,FTHG,FTAG\nF1,16/08/2024,Paris SG,FC Nantes,1,0\n";
+
+    #[test]
+    fn elo_replays_the_backfill_and_uses_the_ratings_before_the_match() {
+        let mut ratings = EloRatings::default();
+        let previous = parse_season_matches(2023, RESULTS_2023)
+            .expect("parse previous season")
+            .remove(0);
+        ratings.apply_results([previous.result]);
+
+        let current = parse_season_matches(2024, RESULTS_2024)
+            .expect("parse evaluated season")
+            .remove(0);
+        let mut expected = Accumulator::default();
+        evaluate_elo(&ratings, &current, &mut expected);
+
+        let report = build_report(vec![
+            fixture_file(2023, RESULTS_2023),
+            fixture_file(2024, RESULTS_2024),
+        ]);
+
+        assert_eq!(report.evaluation_matches, 1);
+        assert_eq!(report.configurations.len(), 1);
+        assert_eq!(report.configurations[0].configuration, Configuration::Elo);
+        assert_eq!(
+            report.configurations[0].metrics,
+            expected.metrics().expect("one evaluated match")
+        );
+    }
+
+    #[test]
+    fn check_accepts_a_metric_within_tolerance_and_rejects_beyond_it() {
+        let report = fixture_report();
+        let reference = report.reference();
+
+        let mut within = reference.clone();
+        within
+            .configurations
+            .get_mut("average_closing")
+            .expect("average closing entry")
+            .exact += 5e-4;
+        assert!(check(&report, &within).is_ok());
+
+        let mut beyond = reference;
+        beyond
+            .configurations
+            .get_mut("average_closing")
+            .expect("average closing entry")
+            .exact += 2e-3;
+        assert!(matches!(
+            check(&report, &beyond),
+            Err(CheckError::Metric {
+                metric: "exact",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn check_rejects_a_different_match_count() {
+        let report = fixture_report();
+        let mut reference = report.reference();
+        reference
+            .configurations
+            .get_mut("average_closing")
+            .expect("average closing entry")
+            .n += 1;
+
+        assert!(matches!(
+            check(&report, &reference),
+            Err(CheckError::Count { .. })
+        ));
+    }
+
+    #[test]
+    fn check_skips_a_configuration_that_disappeared_from_the_report() {
+        let csv = "Div,Date,HomeTeam,AwayTeam,FTHG,FTAG,AvgCH,AvgCD,AvgCA,AvgC>2.5,AvgC<2.5\n\
+            F1,16/08/2024,Le Havre,Paris SG,1,4,7.3,4.9,1.37,1.69,2.13\n";
+        let report = build_report(vec![fixture_file(2024, csv)]);
+        let mut reference = report.reference();
+        let metrics = reference.configurations["average_closing"];
+        reference
+            .configurations
+            .insert("pinnacle_closing".to_owned(), metrics);
+
+        let outcome = check(&report, &reference).expect("a missing source is tolerated");
+        assert_eq!(outcome.checked, 1);
+        assert_eq!(outcome.skipped, ["pinnacle_closing"]);
+    }
+
+    #[test]
+    fn check_rejects_a_configuration_missing_from_the_reference() {
+        let report = fixture_report();
+        let mut reference = report.reference();
+        reference.configurations.remove("pinnacle_closing");
+
+        assert!(matches!(
+            check(&report, &reference),
+            Err(CheckError::Unrecorded { key }) if key == "pinnacle_closing"
+        ));
+    }
+
+    #[test]
+    fn the_reference_roundtrips_through_a_file() {
+        let report = fixture_report();
+        let path = std::env::temp_dir().join(format!(
+            "mpp-autopilot-backtest-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+
+        write_reference(&report, &path).expect("write reference");
+        let loaded = read_reference(&path).expect("read reference");
+        let _ = fs::remove_file(&path);
+
+        let expected = report.reference();
+        assert_eq!(loaded.version, expected.version);
+        assert_eq!(loaded.from_season, expected.from_season);
+        assert_eq!(loaded.to_season, expected.to_season);
+        assert_eq!(loaded.configurations.len(), expected.configurations.len());
+        for (key, expected) in &expected.configurations {
+            let loaded = &loaded.configurations[key];
+            assert_eq!(loaded.n, expected.n);
+            assert!(within_tolerance(loaded.exact, expected.exact));
+            assert!(within_tolerance(loaded.one_x_two, expected.one_x_two));
+            assert!(within_tolerance(loaded.hit, expected.hit));
+        }
     }
 
     #[test]
