@@ -176,6 +176,7 @@ impl<'a, M: MppApi, E: EloSite, O: OddsSite> Orchestrator<'a, M, E, O> {
                     existing.kickoff = fixture.kickoff;
                     existing.triggers.remove(&Trigger::T60);
                     existing.triggers.remove(&Trigger::T5);
+                    existing.triggers.remove(&Trigger::T1);
                 }
             } else {
                 self.state

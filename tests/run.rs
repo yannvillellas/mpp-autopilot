@@ -579,8 +579,8 @@ async fn past_kickoff_marks_pending_triggers_without_elo() {
 
     let report = runner.execute_once(now()).await.expect("execute once");
 
-    assert_eq!(report.triggers, 3);
-    assert_eq!(report.skipped, 3);
+    assert_eq!(report.triggers, 4);
+    assert_eq!(report.skipped, 4);
     assert_eq!(report.writes, 0);
     assert_eq!(elo.calls(), 0);
     assert!(mpp.writes().is_empty());
@@ -589,6 +589,60 @@ async fn past_kickoff_marks_pending_triggers_without_elo() {
     for trigger in Trigger::ALL {
         assert!(saved.is_trigger_done(trigger));
     }
+}
+
+#[tokio::test]
+async fn t1_after_kickoff_is_marked_without_fetching() {
+    let past_kickoff = now() - Duration::minutes(1);
+    let mut state = state_with_match(Mode::Write, past_kickoff);
+    {
+        let saved = state.matches.get_mut("match-1").expect("match state");
+        saved.record_trigger(Trigger::Publish, now() - Duration::days(1));
+        saved.record_trigger(Trigger::T60, now() - Duration::hours(1));
+        saved.record_trigger(Trigger::T5, now() - Duration::minutes(5));
+    }
+
+    let mpp = FakeMpp::new(snapshot(past_kickoff));
+    let elo = FakeElo::new(ratings());
+    let market = FakeOdds::empty();
+    let dir = TestDir::new();
+    let path = dir.path().join("state.json");
+    let mut runner = Orchestrator::new(&mpp, &elo, Mode::Write, state, path).with_market(&market);
+
+    let report = runner.execute_once(now()).await.expect("execute once");
+
+    assert_eq!(report.triggers, 1);
+    assert_eq!(report.skipped, 1);
+    assert_eq!(market.calls(), 0);
+    assert_eq!(elo.calls(), 0);
+    assert!(mpp.writes().is_empty());
+    assert!(runner.state().matches["match-1"].is_trigger_done(Trigger::T1));
+}
+
+#[tokio::test]
+async fn t1_due_one_minute_before_kickoff_is_marked() {
+    let kickoff = now() + Duration::minutes(1);
+    let mut state = state_with_match(Mode::Write, kickoff);
+    {
+        let saved = state.matches.get_mut("match-1").expect("match state");
+        saved.record_trigger(Trigger::Publish, now() - Duration::days(1));
+        saved.record_trigger(Trigger::T60, now() - Duration::hours(1));
+        saved.record_trigger(Trigger::T5, now() - Duration::minutes(5));
+    }
+
+    let mpp = FakeMpp::new(snapshot(kickoff));
+    let elo = FakeElo::new(ratings());
+    let market = FakeOdds::empty();
+    let dir = TestDir::new();
+    let path = dir.path().join("state.json");
+    let mut runner = Orchestrator::new(&mpp, &elo, Mode::Write, state, path).with_market(&market);
+
+    let report = runner.execute_once(now()).await.expect("execute once");
+
+    assert_eq!(report.triggers, 1);
+    assert_eq!(report.skipped, 0);
+    assert_eq!(market.calls(), 1);
+    assert!(runner.state().matches["match-1"].is_trigger_done(Trigger::T1));
 }
 
 #[tokio::test]
@@ -770,6 +824,7 @@ async fn kickoff_change_resets_pre_match_triggers() {
         let saved = state.matches.get_mut("match-1").expect("match state");
         saved.record_trigger(Trigger::Publish, now());
         saved.record_trigger(Trigger::T60, now());
+        saved.record_trigger(Trigger::T1, now());
     }
 
     let mpp = FakeMpp::new(snapshot(new_kickoff));
@@ -785,6 +840,7 @@ async fn kickoff_change_resets_pre_match_triggers() {
     assert_eq!(saved.kickoff, new_kickoff);
     assert!(saved.is_trigger_done(Trigger::Publish));
     assert!(!saved.is_trigger_done(Trigger::T60));
+    assert!(!saved.is_trigger_done(Trigger::T1));
 }
 
 #[tokio::test]
