@@ -17,7 +17,9 @@ seconds (odds request, Elo refresh, forecast read-back and PATCH), so it can
 cross kickoff. This is now an expected outcome: the kickoff lock answers HTTP
 403 with `matchForecastsNotAllowed`; the trigger is marked without a write and
 the forecast written at T-5 stays in place. T-1 is acceptable only because
-that lock is handled as an expected result.
+that lock is handled as an expected result. Any other 403 is not a lock: the
+pass fails and the trigger stays pending, so a revoked token or a permission
+error is never silently consumed.
 
 ## Prediction sources
 

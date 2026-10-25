@@ -46,10 +46,16 @@ struct FakeMpp {
     snapshot: Snapshot,
     writes: Mutex<Vec<(String, Score)>>,
     forecasts: Mutex<HashMap<String, Score>>,
-    fail_status: Mutex<Option<(Option<String>, StatusCode)>>,
+    fail_status: Mutex<Option<FakeWriteFailure>>,
     fail_reads: Mutex<Option<StatusCode>>,
     lose_write_response: Mutex<bool>,
     reads: AtomicUsize,
+}
+
+struct FakeWriteFailure {
+    match_id: Option<String>,
+    status: StatusCode,
+    body: String,
 }
 
 impl FakeMpp {
@@ -66,12 +72,27 @@ impl FakeMpp {
     }
 
     fn fail_writes(&self, status: StatusCode) {
-        *self.fail_status.lock().expect("fail status lock") = Some((None, status));
+        self.fail_writes_with_body(status, "forced write failure");
     }
 
     fn fail_writes_for(&self, match_id: &str, status: StatusCode) {
-        *self.fail_status.lock().expect("fail status lock") =
-            Some((Some(match_id.to_owned()), status));
+        self.set_write_failure(
+            Some(match_id.to_owned()),
+            status,
+            "forced write failure".to_owned(),
+        );
+    }
+
+    fn fail_writes_with_body(&self, status: StatusCode, body: impl Into<String>) {
+        self.set_write_failure(None, status, body.into());
+    }
+
+    fn set_write_failure(&self, match_id: Option<String>, status: StatusCode, body: String) {
+        *self.fail_status.lock().expect("fail status lock") = Some(FakeWriteFailure {
+            match_id,
+            status,
+            body,
+        });
     }
 
     fn fail_reads(&self, status: StatusCode) {
@@ -130,11 +151,15 @@ impl MppApi for FakeMpp {
 
     async fn submit_forecast(&self, match_id: &str, score: Score) -> Result<(), MppError> {
         let fail = self.fail_status.lock().expect("fail status lock");
-        if let Some((target, status)) = fail.as_ref() {
-            if target.as_deref().is_none_or(|target| target == match_id) {
+        if let Some(failure) = fail.as_ref() {
+            if failure
+                .match_id
+                .as_deref()
+                .is_none_or(|target| target == match_id)
+            {
                 return Err(MppError::Status {
-                    status: *status,
-                    body: "forced write failure".to_owned(),
+                    status: failure.status,
+                    body: failure.body.clone(),
                 });
             }
         }
@@ -724,6 +749,65 @@ async fn permanent_write_failure_marks_the_trigger() {
     assert_eq!(mpp.reads(), 1);
     assert!(mpp.writes().is_empty());
     assert!(runner.state().matches["match-1"].is_trigger_done(Trigger::Publish));
+}
+
+#[tokio::test]
+async fn kickoff_lock_marks_the_trigger_without_a_pass_error() {
+    let mpp = FakeMpp::new(snapshot(kickoff()));
+    mpp.fail_writes_with_body(
+        StatusCode::FORBIDDEN,
+        r#"{"error":"matchForecastsNotAllowed"}"#,
+    );
+    let elo = FakeElo::new(ratings());
+    let dir = TestDir::new();
+    let path = dir.path().join("state.json");
+    let mut runner = Orchestrator::new(
+        &mpp,
+        &elo,
+        Mode::Write,
+        state_with_match(Mode::Write, kickoff()),
+        path,
+    );
+
+    let report = runner
+        .execute_once(now())
+        .await
+        .expect("kickoff lock is expected");
+
+    assert_eq!(report.triggers, 1);
+    assert_eq!(report.writes, 0);
+    assert_eq!(report.skipped, 1);
+    assert_eq!(mpp.reads(), 1);
+    assert!(mpp.writes().is_empty());
+    assert!(runner.state().matches["match-1"].is_trigger_done(Trigger::Publish));
+}
+
+#[tokio::test]
+async fn other_forbidden_responses_still_fail_the_pass() {
+    let mpp = FakeMpp::new(snapshot(kickoff()));
+    mpp.fail_writes_with_body(StatusCode::FORBIDDEN, r#"{"error":"token revoked"}"#);
+    let elo = FakeElo::new(ratings());
+    let dir = TestDir::new();
+    let path = dir.path().join("state.json");
+    let mut runner = Orchestrator::new(
+        &mpp,
+        &elo,
+        Mode::Write,
+        state_with_match(Mode::Write, kickoff()),
+        path,
+    );
+
+    let error = runner
+        .execute_once(now())
+        .await
+        .expect_err("forbidden is not a kickoff lock");
+
+    assert!(matches!(
+        error,
+        RunError::Mpp(MppError::Status { status, .. }) if status == StatusCode::FORBIDDEN
+    ));
+    assert!(!runner.state().matches["match-1"].is_trigger_done(Trigger::Publish));
+    assert!(mpp.writes().is_empty());
 }
 
 #[tokio::test]

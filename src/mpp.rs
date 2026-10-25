@@ -246,6 +246,27 @@ impl MppError {
             Self::ClientBuild(_) | Self::Json(_) | Self::InvalidPayload(_) => false,
         }
     }
+
+    /// Returns whether MPP rejected the request with HTTP 403.
+    pub fn is_forbidden(&self) -> bool {
+        matches!(
+            self,
+            Self::Status { status, .. } if *status == StatusCode::FORBIDDEN
+        )
+    }
+
+    /// Returns whether MPP refused the write because the kickoff lock closed.
+    ///
+    /// The API answers HTTP 403 with `matchForecastsNotAllowed` when forecasts
+    /// are locked at kickoff. Any other 403, such as a revoked token or a
+    /// permission error, is not a kickoff lock and remains a failure.
+    pub fn is_kickoff_locked(&self) -> bool {
+        self.is_forbidden()
+            && matches!(
+                self,
+                Self::Status { body, .. } if body.contains("matchForecastsNotAllowed")
+            )
+    }
 }
 
 async fn check_response(response: Response) -> Result<Response, MppError> {

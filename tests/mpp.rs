@@ -49,3 +49,48 @@ fn transient_errors_are_classified() {
     let json_error = serde_json::from_str::<Value>("{").expect_err("invalid JSON");
     assert!(!MppError::Json(json_error).is_transient());
 }
+
+#[test]
+fn kickoff_lock_is_recognized_by_status_and_body() {
+    assert!(
+        MppError::Status {
+            status: StatusCode::FORBIDDEN,
+            body: r#"{"error":"matchForecastsNotAllowed"}"#.to_owned(),
+        }
+        .is_kickoff_locked()
+    );
+    assert!(
+        !MppError::Status {
+            status: StatusCode::FORBIDDEN,
+            body: r#"{"error":"token revoked"}"#.to_owned(),
+        }
+        .is_kickoff_locked()
+    );
+    assert!(
+        !MppError::Status {
+            status: StatusCode::BAD_REQUEST,
+            body: "matchForecastsNotAllowed".to_owned(),
+        }
+        .is_kickoff_locked()
+    );
+    assert!(!MppError::Unauthorized.is_kickoff_locked());
+}
+
+#[test]
+fn forbidden_is_recognized_from_the_status_alone() {
+    assert!(
+        MppError::Status {
+            status: StatusCode::FORBIDDEN,
+            body: String::new(),
+        }
+        .is_forbidden()
+    );
+    assert!(
+        !MppError::Status {
+            status: StatusCode::BAD_REQUEST,
+            body: String::new(),
+        }
+        .is_forbidden()
+    );
+    assert!(!MppError::Unauthorized.is_forbidden());
+}
