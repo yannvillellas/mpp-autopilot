@@ -1,6 +1,8 @@
 //! Reference-case and invariants for the expected-points model.
 
-use mpp_autopilot::model::{Odds, Outcome, Score, lambdas, predict};
+use mpp_autopilot::model::{
+    Lambdas, ModelError, Odds, Outcome, Score, lambdas, predict, predict_from_lambdas,
+};
 
 const TOLERANCE: f64 = 5e-4;
 
@@ -59,6 +61,47 @@ fn stronger_home_team_gets_higher_lambda() {
     assert!(lambdas.home > lambdas.away);
     assert!(lambdas.home > 0.0);
     assert!(lambdas.away > 0.0);
+}
+
+#[test]
+fn the_lambda_entry_point_matches_the_elo_path() {
+    let odds = Odds {
+        home: 81.0,
+        draw: 117.0,
+        away: 112.0,
+    };
+    let home_elo = 1684.0983240112262;
+    let away_elo = 1670.9520303480226;
+    let expected = lambdas(home_elo, away_elo).expect("valid Elo ratings");
+
+    assert_eq!(
+        predict_from_lambdas(expected, odds).expect("valid lambdas"),
+        predict(home_elo, away_elo, odds).expect("valid Elo ratings")
+    );
+}
+
+#[test]
+fn invalid_lambdas_are_rejected() {
+    let odds = Odds {
+        home: 81.0,
+        draw: 117.0,
+        away: 112.0,
+    };
+    for lambdas in [
+        Lambdas {
+            home: 0.0,
+            away: 1.0,
+        },
+        Lambdas {
+            home: 1.0,
+            away: f64::NAN,
+        },
+    ] {
+        assert!(matches!(
+            predict_from_lambdas(lambdas, odds),
+            Err(ModelError::InvalidLambdas)
+        ));
+    }
 }
 
 #[test]
