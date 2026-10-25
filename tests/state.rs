@@ -305,6 +305,7 @@ fn trigger_names_and_score_match_the_state_schema() {
     let mut match_state = match_state(at(23, 18));
     match_state.record_trigger(Trigger::T60, at(23, 17));
     match_state.record_trigger(Trigger::T5, at(23, 18));
+    match_state.record_trigger(Trigger::T1, at(23, 18));
     state.matches.insert("match-1".to_owned(), match_state);
 
     let json = serde_json::to_value(&state).expect("serialize state");
@@ -316,6 +317,49 @@ fn trigger_names_and_score_match_the_state_schema() {
     assert!(triggers.contains_key("publish"));
     assert!(triggers.contains_key("t60"));
     assert!(triggers.contains_key("t5"));
+    assert!(triggers.contains_key("t1"));
+}
+
+#[test]
+fn state_written_before_t1_still_loads_and_keeps_its_trigger_keys() {
+    let json = r#"{
+      "mode": "write",
+      "matches": {
+        "match-1": {
+          "kickoff": "2026-10-23T18:45:00Z",
+          "triggers": {
+            "publish": "2026-10-19T05:00:00Z",
+            "t60": "2026-10-23T17:45:00Z",
+            "t5": "2026-10-23T18:40:00Z"
+          }
+        }
+      }
+    }"#;
+
+    let state: State = serde_json::from_str(json).expect("parse state written before T-1");
+    let saved = &state.matches["match-1"];
+
+    assert_eq!(saved.triggers.get(&Trigger::Publish), Some(&at(19, 5)));
+    assert_eq!(
+        saved.triggers.get(&Trigger::T60),
+        Some(&(at(23, 17) + Duration::minutes(45)))
+    );
+    assert_eq!(
+        saved.triggers.get(&Trigger::T5),
+        Some(&(at(23, 18) + Duration::minutes(40)))
+    );
+    assert!(!saved.is_trigger_done(Trigger::T1));
+
+    let json = serde_json::to_value(&state).expect("serialize state");
+    let triggers = json["matches"]["match-1"]["triggers"]
+        .as_object()
+        .expect("triggers object");
+
+    assert_eq!(triggers.len(), 3);
+    assert!(triggers.contains_key("publish"));
+    assert!(triggers.contains_key("t60"));
+    assert!(triggers.contains_key("t5"));
+    assert!(!triggers.contains_key("t1"));
 }
 
 #[test]

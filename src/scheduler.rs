@@ -88,6 +88,7 @@ pub fn trigger_due_at(trigger: Trigger, kickoff: DateTime<Utc>) -> Option<DateTi
         Trigger::Publish => None,
         Trigger::T60 => Some(kickoff - Duration::minutes(60)),
         Trigger::T5 => Some(kickoff - Duration::minutes(5)),
+        Trigger::T1 => Some(kickoff - Duration::minutes(1)),
     }
 }
 

@@ -44,11 +44,14 @@ pub enum Trigger {
     /// Five minutes before kickoff.
     #[serde(rename = "t5")]
     T5,
+    /// One minute before kickoff.
+    #[serde(rename = "t1")]
+    T1,
 }
 
 impl Trigger {
     /// All triggers, in execution order.
-    pub const ALL: [Self; 3] = [Self::Publish, Self::T60, Self::T5];
+    pub const ALL: [Self; 4] = [Self::Publish, Self::T60, Self::T5, Self::T1];
 }
 
 /// Persisted state shared by all matches and the Elo cache.

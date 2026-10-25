@@ -142,6 +142,10 @@ fn trigger_times_are_relative_to_kickoff() {
         trigger_due_at(Trigger::T5, kickoff),
         Some(utc(2026, 10, 23, 18, 40))
     );
+    assert_eq!(
+        trigger_due_at(Trigger::T1, kickoff),
+        Some(utc(2026, 10, 23, 18, 44))
+    );
 }
 
 #[test]
@@ -169,7 +173,29 @@ fn due_triggers_follow_the_match_timeline() {
     );
 
     state.record_trigger(Trigger::T5, utc(2026, 10, 23, 18, 40));
+    assert!(due_triggers(&state, utc(2026, 10, 23, 18, 43)).is_empty());
+    assert_eq!(
+        due_triggers(&state, utc(2026, 10, 23, 18, 44)),
+        vec![Trigger::T1]
+    );
+
+    state.record_trigger(Trigger::T1, utc(2026, 10, 23, 18, 44));
     assert!(due_triggers(&state, utc(2026, 10, 23, 18, 45)).is_empty());
+}
+
+#[test]
+fn t1_is_not_due_before_one_minute_before_kickoff() {
+    let kickoff = utc(2026, 10, 23, 18, 45);
+    let mut state = MatchState::new(kickoff);
+    state.record_trigger(Trigger::Publish, utc(2026, 10, 23, 12, 0));
+    state.record_trigger(Trigger::T60, utc(2026, 10, 23, 17, 45));
+    state.record_trigger(Trigger::T5, utc(2026, 10, 23, 18, 40));
+
+    assert!(due_triggers(&state, utc(2026, 10, 23, 18, 43)).is_empty());
+    assert_eq!(
+        due_triggers(&state, utc(2026, 10, 23, 18, 44)),
+        vec![Trigger::T1]
+    );
 }
 
 #[test]
@@ -179,7 +205,7 @@ fn due_triggers_include_all_pending_after_kickoff() {
 
     assert_eq!(
         due_triggers(&state, utc(2026, 10, 24, 12, 0)),
-        vec![Trigger::Publish, Trigger::T60, Trigger::T5]
+        vec![Trigger::Publish, Trigger::T60, Trigger::T5, Trigger::T1]
     );
 }
 
@@ -190,7 +216,7 @@ fn due_triggers_include_all_pending_at_kickoff() {
 
     assert_eq!(
         due_triggers(&state, kickoff),
-        vec![Trigger::Publish, Trigger::T60, Trigger::T5]
+        vec![Trigger::Publish, Trigger::T60, Trigger::T5, Trigger::T1]
     );
 }
 
@@ -244,6 +270,7 @@ fn next_trigger_wake_returns_none_when_everything_ran() {
     state.record_trigger(Trigger::Publish, utc(2026, 10, 23, 12, 0));
     state.record_trigger(Trigger::T60, utc(2026, 10, 23, 17, 45));
     state.record_trigger(Trigger::T5, utc(2026, 10, 23, 18, 40));
+    state.record_trigger(Trigger::T1, utc(2026, 10, 23, 18, 44));
     let matches = BTreeMap::from([("match-1".to_owned(), state)]);
 
     assert_eq!(next_trigger_wake(utc(2026, 10, 23, 18, 45), &matches), None);

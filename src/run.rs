@@ -176,6 +176,7 @@ impl<'a, M: MppApi, E: EloSite, O: OddsSite> Orchestrator<'a, M, E, O> {
                     existing.kickoff = fixture.kickoff;
                     existing.triggers.remove(&Trigger::T60);
                     existing.triggers.remove(&Trigger::T5);
+                    existing.triggers.remove(&Trigger::T1);
                 }
             } else {
                 self.state
@@ -511,6 +512,18 @@ impl<'a, M: MppApi, E: EloSite, O: OddsSite> Orchestrator<'a, M, E, O> {
                     report.triggers += 1;
                     report.writes += 1;
                 }
+                Err(error) if error.is_kickoff_locked() => {
+                    info!(
+                        match_id = %match_id,
+                        trigger = ?trigger,
+                        kickoff = %self.state.matches[&match_id].kickoff,
+                        error = %error,
+                        "kickoff passed; MPP locked the forecast; trigger marked without write"
+                    );
+                    self.mark_trigger(&match_id, trigger, now)?;
+                    report.triggers += 1;
+                    report.skipped += 1;
+                }
                 Err(error) if error.is_transient() => {
                     log_trigger(
                         &fixture,
@@ -537,6 +550,24 @@ impl<'a, M: MppApi, E: EloSite, O: OddsSite> Orchestrator<'a, M, E, O> {
                             }
                         }
                     }
+                }
+                Err(error) if error.is_forbidden() => {
+                    log_trigger(
+                        &fixture,
+                        trigger,
+                        elo,
+                        &prediction,
+                        remote,
+                        source,
+                        "write_failed",
+                    );
+                    warn!(
+                        match_id = %match_id,
+                        trigger = ?trigger,
+                        error = %error,
+                        "MPP write forbidden; trigger left pending"
+                    );
+                    return Err(error.into());
                 }
                 Err(error) => {
                     log_trigger(
