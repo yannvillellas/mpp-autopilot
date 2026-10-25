@@ -32,6 +32,62 @@ fn mpp_variants_map_to_canonical_names() {
 }
 
 #[test]
+fn mpp_club_names_map_to_canonical_names() {
+    let cases = [
+        ("AS Monaco", "Monaco"),
+        ("Angers SCO", "Angers"),
+        ("AJ Auxerre", "AJ Auxerre"),
+        ("Brest", "Brest"),
+        ("Havre AC", "Le Havre"),
+        ("Le Mans FC", "Le Mans FC"),
+        ("LOSC", "Lille OSC"),
+        ("Lorient", "Lorient"),
+        ("OL", "Lyon"),
+        ("OM", "Marseille"),
+        ("Nice", "Nice"),
+        ("Paris FC", "Paris FC"),
+        ("Paris SG", "PSG"),
+        ("RC Lens", "RC Lens"),
+        ("Rennes", "Rennes"),
+        ("Strasbourg", "Strasbourg"),
+        ("Toulouse", "Toulouse"),
+        ("ESTAC Troyes", "Troyes AC"),
+    ];
+
+    for (input, expected) in cases {
+        assert_eq!(canonical_name(input), Some(expected), "input: {input}");
+    }
+}
+
+#[test]
+fn the_odds_api_spellings_map_to_canonical_names() {
+    let cases = [
+        ("AS Monaco", "Monaco"),
+        ("Angers", "Angers"),
+        ("Auxerre", "AJ Auxerre"),
+        ("Brest", "Brest"),
+        ("Le Havre", "Le Havre"),
+        ("Le Mans FC", "Le Mans FC"),
+        ("Lille", "Lille OSC"),
+        ("Lorient", "Lorient"),
+        ("Lyon", "Lyon"),
+        ("Marseille", "Marseille"),
+        ("Nice", "Nice"),
+        ("Paris FC", "Paris FC"),
+        ("Paris Saint Germain", "PSG"),
+        ("RC Lens", "RC Lens"),
+        ("Rennes", "Rennes"),
+        ("Strasbourg", "Strasbourg"),
+        ("Toulouse", "Toulouse"),
+        ("Troyes", "Troyes AC"),
+    ];
+
+    for (input, expected) in cases {
+        assert_eq!(canonical_name(input), Some(expected), "input: {input}");
+    }
+}
+
+#[test]
 fn football_data_spellings_map_to_canonical_names() {
     let cases = [
         ("Ajaccio", "AC Ajaccio"),

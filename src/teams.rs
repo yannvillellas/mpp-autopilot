@@ -2,8 +2,8 @@
 //!
 //! Providers use varying spellings (`LOSC`, `OM`, `Paris SG`, `St Etienne`, …).
 //! Names are folded with NFKD, stripped of combining marks, lowercased and
-//! mapped to a canonical club name. Football-Data results use the same alias
-//! table.
+//! mapped to a canonical club name. The Odds API and Football-Data results use
+//! the same alias table.
 
 use unicode_normalization::UnicodeNormalization;
 use unicode_normalization::char::is_combining_mark;
