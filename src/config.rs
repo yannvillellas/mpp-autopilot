@@ -28,6 +28,8 @@ pub const TOKEN_WARNING_DAYS: i64 = 3;
 pub struct Config {
     /// Auth0 access token. Never log or print this value.
     pub mpp_token: String,
+    /// The Odds API key. Never log or print this value.
+    pub odds_api_key: String,
     /// Whether predictions may be written to MPP.
     pub write: bool,
     /// Hour of the daily fetch, in `Europe/Paris`.
@@ -53,6 +55,8 @@ impl Config {
         F: Fn(&str) -> Option<String>,
     {
         let mpp_token = optional_value(&lookup, "MPP_TOKEN").ok_or(ConfigError::MissingToken)?;
+        let odds_api_key =
+            optional_value(&lookup, "ODDS_API_KEY").ok_or(ConfigError::MissingOddsKey)?;
 
         let write = match optional_value(&lookup, "WRITE").as_deref() {
             None => false,
@@ -79,6 +83,7 @@ impl Config {
 
         Ok(Self {
             mpp_token,
+            odds_api_key,
             write,
             daily_hour,
             state_path,
@@ -91,6 +96,7 @@ impl fmt::Debug for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Config")
             .field("mpp_token", &"[redacted]")
+            .field("odds_api_key", &"[redacted]")
             .field("write", &self.write)
             .field("daily_hour", &self.daily_hour)
             .field("state_path", &self.state_path)
@@ -105,6 +111,9 @@ pub enum ConfigError {
     /// `MPP_TOKEN` is missing or blank.
     #[error("MPP_TOKEN is required")]
     MissingToken,
+    /// `ODDS_API_KEY` is missing or blank.
+    #[error("ODDS_API_KEY is required")]
+    MissingOddsKey,
     /// `WRITE` is not `true` or `false`.
     #[error("WRITE must be true or false, got {0:?}")]
     InvalidWrite(String),
@@ -211,8 +220,10 @@ mod tests {
 
     #[test]
     fn defaults_are_applied() {
-        let config = config_with(&[("MPP_TOKEN", "token")]).expect("valid config");
+        let config = config_with(&[("MPP_TOKEN", "token"), ("ODDS_API_KEY", "odds-key")])
+            .expect("valid config");
 
+        assert_eq!(config.odds_api_key, "odds-key");
         assert!(!config.write);
         assert_eq!(config.daily_hour, DEFAULT_DAILY_HOUR);
         assert_eq!(config.state_path, PathBuf::from(DEFAULT_STATE_PATH));
@@ -223,6 +234,7 @@ mod tests {
     fn explicit_values_are_parsed() {
         let config = config_with(&[
             ("MPP_TOKEN", " token "),
+            ("ODDS_API_KEY", " odds-key "),
             ("WRITE", "TRUE"),
             ("DAILY_HOUR", "23"),
             ("STATE_PATH", "/data/state.json"),
@@ -231,6 +243,7 @@ mod tests {
         .expect("valid config");
 
         assert_eq!(config.mpp_token, "token");
+        assert_eq!(config.odds_api_key, "odds-key");
         assert!(config.write);
         assert_eq!(config.daily_hour, 23);
         assert_eq!(config.state_path, PathBuf::from("/data/state.json"));
@@ -241,6 +254,7 @@ mod tests {
     fn empty_optional_values_fall_back_to_defaults() {
         let config = config_with(&[
             ("MPP_TOKEN", "token"),
+            ("ODDS_API_KEY", "odds-key"),
             ("WRITE", ""),
             ("DAILY_HOUR", " "),
             ("STATE_PATH", ""),
@@ -264,9 +278,25 @@ mod tests {
     }
 
     #[test]
+    fn missing_or_blank_odds_key_is_rejected() {
+        assert!(matches!(
+            config_with(&[("MPP_TOKEN", "token")]),
+            Err(ConfigError::MissingOddsKey)
+        ));
+        assert!(matches!(
+            config_with(&[("MPP_TOKEN", "token"), ("ODDS_API_KEY", "   ")]),
+            Err(ConfigError::MissingOddsKey)
+        ));
+    }
+
+    #[test]
     fn invalid_write_is_rejected() {
         assert!(matches!(
-            config_with(&[("MPP_TOKEN", "token"), ("WRITE", "yes")]),
+            config_with(&[
+                ("MPP_TOKEN", "token"),
+                ("ODDS_API_KEY", "odds-key"),
+                ("WRITE", "yes"),
+            ]),
             Err(ConfigError::InvalidWrite(value)) if value == "yes"
         ));
     }
@@ -276,7 +306,11 @@ mod tests {
         for value in ["24", "-1", "abc", "7.5"] {
             assert!(
                 matches!(
-                    config_with(&[("MPP_TOKEN", "token"), ("DAILY_HOUR", value)]),
+                    config_with(&[
+                        ("MPP_TOKEN", "token"),
+                        ("ODDS_API_KEY", "odds-key"),
+                        ("DAILY_HOUR", value),
+                    ]),
                     Err(ConfigError::InvalidDailyHour(invalid)) if invalid == value
                 ),
                 "value: {value}"
@@ -286,8 +320,12 @@ mod tests {
 
     #[test]
     fn midnight_is_a_valid_daily_hour() {
-        let config =
-            config_with(&[("MPP_TOKEN", "token"), ("DAILY_HOUR", "0")]).expect("valid config");
+        let config = config_with(&[
+            ("MPP_TOKEN", "token"),
+            ("ODDS_API_KEY", "odds-key"),
+            ("DAILY_HOUR", "0"),
+        ])
+        .expect("valid config");
 
         assert_eq!(config.daily_hour, 0);
     }

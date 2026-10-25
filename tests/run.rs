@@ -7,8 +7,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use mpp_autopilot::elo::{EloError, EloRatings, EloSite};
-use mpp_autopilot::model::{Odds, Score};
+use mpp_autopilot::model::{self, Lambdas, Odds, Score};
 use mpp_autopilot::mpp::{Club, Fixture, MppApi, MppError, Snapshot};
+use mpp_autopilot::odds::{MarketForecast, OddsError, OddsSite};
 use mpp_autopilot::run::{Orchestrator, RunError};
 use mpp_autopilot::state::{MatchState, Mode, State, Trigger};
 use reqwest::StatusCode;
@@ -199,6 +200,57 @@ impl EloSite for FakeElo {
             });
         }
         Ok(self.ratings.clone())
+    }
+}
+
+struct FakeOdds {
+    forecasts: Mutex<Vec<MarketForecast>>,
+    calls: AtomicUsize,
+    fail: AtomicBool,
+}
+
+impl FakeOdds {
+    fn new(forecasts: Vec<MarketForecast>) -> Self {
+        Self {
+            forecasts: Mutex::new(forecasts),
+            calls: AtomicUsize::new(0),
+            fail: AtomicBool::new(false),
+        }
+    }
+
+    fn empty() -> Self {
+        Self::new(Vec::new())
+    }
+
+    fn fail(&self) {
+        self.fail.store(true, Ordering::Relaxed);
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::Relaxed)
+    }
+}
+
+impl OddsSite for FakeOdds {
+    async fn fetch_forecasts(&self) -> Result<Vec<MarketForecast>, OddsError> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        if self.fail.load(Ordering::Relaxed) {
+            return Err(OddsError::Status {
+                status: StatusCode::BAD_REQUEST,
+                body: "forced odds failure".to_owned(),
+            });
+        }
+        Ok(self.forecasts.lock().expect("forecasts lock").clone())
+    }
+}
+
+fn market_forecast(home: &str, away: &str, lambdas: Lambdas) -> MarketForecast {
+    MarketForecast {
+        commence_time: kickoff(),
+        home_team: home.to_owned(),
+        away_team: away.to_owned(),
+        lambdas,
+        observed_at: now(),
     }
 }
 
@@ -828,6 +880,7 @@ async fn elo_fetch_failure_without_a_cache_fails_the_pass() {
     let mpp = FakeMpp::new(snapshot(kickoff()));
     let elo = FakeElo::new(ratings());
     elo.fail();
+    let market = FakeOdds::empty();
     let dir = TestDir::new();
     let path = dir.path().join("state.json");
     let mut runner = Orchestrator::new(
@@ -836,12 +889,14 @@ async fn elo_fetch_failure_without_a_cache_fails_the_pass() {
         Mode::Write,
         state_with_match(Mode::Write, kickoff()),
         path,
-    );
+    )
+    .with_market(&market);
 
     let error = runner.execute_once(now()).await.expect_err("no cache");
 
     assert!(matches!(error, RunError::Elo(_)));
     assert_eq!(elo.calls(), 1);
+    assert_eq!(market.calls(), 1);
     assert_eq!(mpp.reads(), 0);
     assert!(mpp.writes().is_empty());
     assert!(!runner.state().matches["match-1"].is_trigger_done(Trigger::Publish));
@@ -923,4 +978,230 @@ async fn successful_elo_fetch_is_cached_for_later_failures() {
     assert_eq!(report.writes, 0);
     assert_eq!(report.unchanged, 1);
     assert!(runner.state().matches["match-1"].is_trigger_done(Trigger::T60));
+}
+
+#[tokio::test]
+async fn market_odds_are_used_before_elo() {
+    let market_lambdas = Lambdas {
+        home: 2.4,
+        away: 0.6,
+    };
+    let market_pick =
+        model::predict_from_lambdas(market_lambdas, odds()).expect("market prediction");
+    let elo_pick =
+        model::predict(1684.0983240112262, 1670.9520303480226, odds()).expect("Elo prediction");
+    assert_ne!(market_pick.pick, elo_pick.pick);
+
+    let mpp = FakeMpp::new(snapshot(kickoff()));
+    let elo = FakeElo::new(ratings());
+    elo.fail();
+    let market = FakeOdds::new(vec![market_forecast(
+        "Paris SG",
+        "Marseille",
+        market_lambdas,
+    )]);
+    let dir = TestDir::new();
+    let path = dir.path().join("state.json");
+    let mut runner = Orchestrator::new(
+        &mpp,
+        &elo,
+        Mode::Write,
+        state_with_match(Mode::Write, kickoff()),
+        path,
+    )
+    .with_market(&market);
+
+    let report = runner.execute_once(now()).await.expect("execute once");
+
+    assert_eq!(report.writes, 1);
+    assert_eq!(report.skipped, 0);
+    assert_eq!(mpp.writes(), vec![("match-1".to_owned(), market_pick.pick)]);
+    assert_eq!(market.calls(), 1);
+    assert_eq!(elo.calls(), 1);
+}
+
+#[tokio::test]
+async fn fixture_without_market_odds_falls_back_to_elo() {
+    let elo_pick =
+        model::predict(1684.0983240112262, 1670.9520303480226, odds()).expect("Elo prediction");
+    let mpp = FakeMpp::new(snapshot(kickoff()));
+    let elo = FakeElo::new(ratings());
+    let market = FakeOdds::empty();
+    let dir = TestDir::new();
+    let path = dir.path().join("state.json");
+    let mut runner = Orchestrator::new(
+        &mpp,
+        &elo,
+        Mode::Write,
+        state_with_match(Mode::Write, kickoff()),
+        path,
+    )
+    .with_market(&market);
+
+    let report = runner.execute_once(now()).await.expect("execute once");
+
+    assert_eq!(report.writes, 1);
+    assert_eq!(report.skipped, 0);
+    assert_eq!(mpp.writes(), vec![("match-1".to_owned(), elo_pick.pick)]);
+    assert_eq!(market.calls(), 1);
+    assert_eq!(elo.calls(), 1);
+}
+
+#[tokio::test]
+async fn market_request_failure_falls_back_to_elo() {
+    let elo_pick =
+        model::predict(1684.0983240112262, 1670.9520303480226, odds()).expect("Elo prediction");
+    let mpp = FakeMpp::new(snapshot(kickoff()));
+    let elo = FakeElo::new(ratings());
+    let market = FakeOdds::empty();
+    market.fail();
+    let dir = TestDir::new();
+    let path = dir.path().join("state.json");
+    let mut runner = Orchestrator::new(
+        &mpp,
+        &elo,
+        Mode::Write,
+        state_with_match(Mode::Write, kickoff()),
+        path,
+    )
+    .with_market(&market);
+
+    let report = runner.execute_once(now()).await.expect("execute once");
+
+    assert_eq!(report.writes, 1);
+    assert_eq!(report.skipped, 0);
+    assert_eq!(mpp.writes(), vec![("match-1".to_owned(), elo_pick.pick)]);
+    assert_eq!(market.calls(), 1);
+    assert_eq!(elo.calls(), 1);
+}
+
+#[tokio::test]
+async fn missing_market_odds_use_cached_elo() {
+    let fetched_at = now() - Duration::days(2);
+    let mut state = state_with_match(Mode::Write, kickoff());
+    state.record_elo(ratings(), fetched_at);
+    let elo_pick =
+        model::predict(1684.0983240112262, 1670.9520303480226, odds()).expect("Elo prediction");
+
+    let mpp = FakeMpp::new(snapshot(kickoff()));
+    let elo = FakeElo::new(EloRatings::default());
+    elo.fail();
+    let market = FakeOdds::empty();
+    let dir = TestDir::new();
+    let path = dir.path().join("state.json");
+    let mut runner = Orchestrator::new(&mpp, &elo, Mode::Write, state, path).with_market(&market);
+
+    let report = runner.execute_once(now()).await.expect("cached ratings");
+
+    assert_eq!(report.writes, 1);
+    assert_eq!(report.skipped, 0);
+    assert_eq!(mpp.writes(), vec![("match-1".to_owned(), elo_pick.pick)]);
+    assert_eq!(market.calls(), 1);
+    assert_eq!(elo.calls(), 1);
+}
+
+#[tokio::test]
+async fn one_market_request_serves_every_fixture_in_the_pass() {
+    let mut snapshot = snapshot(kickoff());
+    let mut second = fixture(kickoff());
+    second.id = "match-2".to_owned();
+    snapshot.matches.push(second);
+
+    let market_lambdas = Lambdas {
+        home: 2.4,
+        away: 0.6,
+    };
+    let market_pick =
+        model::predict_from_lambdas(market_lambdas, odds()).expect("market prediction");
+    let mpp = FakeMpp::new(snapshot);
+    let elo = FakeElo::new(ratings());
+    let market = FakeOdds::new(vec![market_forecast(
+        "Paris SG",
+        "Marseille",
+        market_lambdas,
+    )]);
+    let dir = TestDir::new();
+    let path = dir.path().join("state.json");
+    let mut state = state_with_match(Mode::Write, kickoff());
+    state
+        .matches
+        .insert("match-2".to_owned(), MatchState::new(kickoff()));
+    let mut runner = Orchestrator::new(&mpp, &elo, Mode::Write, state, path).with_market(&market);
+
+    let report = runner.execute_once(now()).await.expect("execute once");
+
+    assert_eq!(report.writes, 2);
+    assert_eq!(market.calls(), 1);
+    assert_eq!(
+        mpp.writes(),
+        vec![
+            ("match-1".to_owned(), market_pick.pick),
+            ("match-2".to_owned(), market_pick.pick),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_market_event_five_hours_away_is_matched() {
+    let market_lambdas = Lambdas {
+        home: 2.4,
+        away: 0.6,
+    };
+    let market_pick =
+        model::predict_from_lambdas(market_lambdas, odds()).expect("market prediction");
+    let mut event = market_forecast("Paris SG", "Marseille", market_lambdas);
+    event.commence_time = kickoff() + Duration::hours(5);
+
+    let mpp = FakeMpp::new(snapshot(kickoff()));
+    let elo = FakeElo::new(ratings());
+    let market = FakeOdds::new(vec![event]);
+    let dir = TestDir::new();
+    let path = dir.path().join("state.json");
+    let mut runner = Orchestrator::new(
+        &mpp,
+        &elo,
+        Mode::Write,
+        state_with_match(Mode::Write, kickoff()),
+        path,
+    )
+    .with_market(&market);
+
+    let report = runner.execute_once(now()).await.expect("execute once");
+
+    assert_eq!(report.writes, 1);
+    assert_eq!(mpp.writes(), vec![("match-1".to_owned(), market_pick.pick)]);
+}
+
+#[tokio::test]
+async fn a_market_event_seven_hours_away_is_not_matched() {
+    let elo_pick =
+        model::predict(1684.0983240112262, 1670.9520303480226, odds()).expect("Elo prediction");
+    let mut event = market_forecast(
+        "Paris SG",
+        "Marseille",
+        Lambdas {
+            home: 2.4,
+            away: 0.6,
+        },
+    );
+    event.commence_time = kickoff() + Duration::hours(7);
+
+    let mpp = FakeMpp::new(snapshot(kickoff()));
+    let elo = FakeElo::new(ratings());
+    let market = FakeOdds::new(vec![event]);
+    let dir = TestDir::new();
+    let path = dir.path().join("state.json");
+    let mut runner = Orchestrator::new(
+        &mpp,
+        &elo,
+        Mode::Write,
+        state_with_match(Mode::Write, kickoff()),
+        path,
+    )
+    .with_market(&market);
+
+    let report = runner.execute_once(now()).await.expect("execute once");
+
+    assert_eq!(report.writes, 1);
+    assert_eq!(mpp.writes(), vec![("match-1".to_owned(), elo_pick.pick)]);
 }

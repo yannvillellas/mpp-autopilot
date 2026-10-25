@@ -25,6 +25,7 @@ fn timestamp(year: i32, month: u32, day: u32, hour: u32) -> DateTime<Utc> {
 fn debug_output_redacts_the_token() {
     let config = Config {
         mpp_token: "super-secret-token".to_owned(),
+        odds_api_key: "super-secret-odds-key".to_owned(),
         write: false,
         daily_hour: 7,
         state_path: PathBuf::from("./state.json"),
@@ -33,6 +34,7 @@ fn debug_output_redacts_the_token() {
     let debug = format!("{config:?}");
 
     assert!(!debug.contains("super-secret-token"));
+    assert!(!debug.contains("super-secret-odds-key"));
     assert!(debug.contains("[redacted]"));
 }
 
