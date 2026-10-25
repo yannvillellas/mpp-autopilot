@@ -79,8 +79,8 @@ the project overview.
 
 - Current scope: Ligue 1. Other competitions may come later.
 - MPP Autopilot performs one snapshot fetch per day; do not poll outside the
-  scheduled triggers. In write mode, each trigger reads the forecast back
-  before writing.
+  scheduled triggers: publication on the daily pass, then T-60, T-5 and T-1.
+  In write mode, each trigger reads the forecast back before writing.
 - `WRITE=false` by default; writing is opt-in.
 - Elo ratings are computed from Football-Data.co.uk Ligue 1 results. The
   archive is backfilled from 2020/21 once, then each pass applies only new

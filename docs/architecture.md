@@ -3,13 +3,21 @@
 ## Runtime flow
 
 1. Once a day, fetch the Ligue 1 clubs and matches from MPP.
-2. Schedule three triggers per match: publication, T-60 minutes, and T-5
-   minutes.
+2. Schedule four triggers per match: publication, T-60 minutes, T-5 minutes
+   and T-1 minutes.
 3. At each trigger, fetch every upcoming Ligue 1 event from The Odds API with
    one request. A fixture whose event has usable `h2h` and 2.5-goal `totals`
    odds is predicted from the market; otherwise the Football-Data Elo path
    answers, falling back to the last successful ratings when the fetch fails.
    The best exact score is then written when needed.
+
+The last trigger is T-1 because it is the closest line to kickoff. A pass gets
+60 seconds before the lock while its theoretical worst case takes about 100
+seconds (odds request, Elo refresh, forecast read-back and PATCH), so it can
+cross kickoff. This is now an expected outcome: the kickoff lock answers HTTP
+403 with `matchForecastsNotAllowed`; the trigger is marked without a write and
+the forecast written at T-5 stays in place. T-1 is acceptable only because
+that lock is handled as an expected result.
 
 ## Prediction sources
 
@@ -49,7 +57,9 @@ with `regions=eu`, `markets=h2h,totals` and `oddsFormat=decimal`. The response
 contains every upcoming Ligue 1 event, so a pass never makes one request per
 match. The key is read from `ODDS_API_KEY`; the service refuses to start
 without it. It is never logged or persisted, and request errors are stripped of
-their URL before they reach a log line.
+their URL before they reach a log line. Each response also carries
+`x-requests-remaining` and `x-requests-used`; the client logs both at info once
+per request, when they are present.
 
 For each event, complete books are used as follows:
 
@@ -211,7 +221,8 @@ State is written atomically to `STATE_PATH` with a temporary file and rename.
       "triggers": {
         "publish": "2026-10-19T05:00:00+00:00",
         "t60": "2026-10-23T17:45:00+00:00",
-        "t5": "2026-10-23T18:40:00+00:00"
+        "t5": "2026-10-23T18:40:00+00:00",
+        "t1": "2026-10-23T18:44:00+00:00"
       },
       "last_written_score": "1-1",
       "last_written_at": "2026-10-19T05:00:01+00:00"
