@@ -12,9 +12,9 @@
 ## Elo ratings
 
 Ratings are computed by the bot from the Ligue 1 results published by
-[Football-Data](https://www.football-data.co.uk), the same publisher used for
-the odds and the backtest. There is no third-party rating service: the rating
-is deterministic and owned by this project. On 612 out-of-sample matches it
+[Football-Data](https://www.football-data.co.uk), the backtest source. Live odds
+come from MPP. There is no third-party rating service: the rating is
+deterministic and owned by this project. On 612 out-of-sample matches it
 scored a 1X2 log-loss of 0.9909 against 0.9950 for ClubElo.
 
 The update rule is ClubElo's published method:
@@ -73,8 +73,10 @@ The CSV is a third-party file with quirks handled by the parser:
 - postponed fixtures have empty scores and are skipped, never treated as 0-0.
 
 The current season's file is published a day or two after the matchday. That
-only delays the newest results; it never fails a pass. If the current file is
-not published yet, the previous ratings keep answering.
+only delays the newest results; it never fails a pass. A missing current-season
+file is tolerated during the one-time backfill, where the archived seasons
+still produce ratings. Once a backfill exists, the same 404 fails the fetch and
+the Elo cache answers with its real age, logged as `elo_source=cache`.
 
 ## Elo cache
 
@@ -136,7 +138,7 @@ State is written atomically to `STATE_PATH` with a temporary file and rename.
       "marseille": 1670.9520303480226,
       "psg": 1684.0983240112262
     },
-    "applied": [      "2026|2026-10-17|psg|marseille"],
+    "applied": ["2026|2026-10-17|psg|marseille"],
     "backfilled_through": 2026
   }
 }

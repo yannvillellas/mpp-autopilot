@@ -155,6 +155,28 @@ fn elo_cache_keeps_applied_matches_across_load() {
 }
 
 #[test]
+fn legacy_clubelo_rating_keys_still_answer_canonical_lookups() {
+    let json = r#"{
+      "mode": "dry",
+      "matches": {},
+      "elo": {
+        "fetched_at": "2026-10-19T05:00:00Z",
+        "ratings": {
+          "paris sg": 1900.0,
+          "marseille": 1700.0
+        }
+      }
+    }"#;
+
+    let state: State = serde_json::from_str(json).expect("parse legacy Elo state");
+    let cached = state.elo.as_ref().expect("cached ratings");
+
+    assert_eq!(cached.ratings.rating("PSG"), Some(1900.0));
+    assert_eq!(state.cached_elo().rating("PSG"), Some(1900.0));
+    assert_eq!(state.cached_elo().rating("Marseille"), Some(1700.0));
+}
+
+#[test]
 fn absent_elo_cache_is_omitted_from_the_state_file() {
     let json = serde_json::to_value(State::new(Mode::Dry)).expect("serialize state");
 

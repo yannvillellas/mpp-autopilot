@@ -1,11 +1,14 @@
 //! Elo ratings computed from Football-Data Ligue 1 results.
 //!
 //! Ratings are built from the `F1.csv` archive published by
-//! <https://football-data.co.uk>, the same publisher used for the odds. The
-//! archive is backfilled once from 2020/21, then each pass fetches the current
-//! season and applies only results that are not already in the persisted
-//! progress. Applied results are identified by season, date and clubs, so a
-//! restart or a re-run of a matchday never counts a match twice.
+//! <https://football-data.co.uk>, the backtest source; live odds come from MPP.
+//! The archive is backfilled once from 2020/21, then each pass fetches the
+//! current season and applies only results that are not already in the
+//! persisted progress. Applied results are identified by season, real date
+//! and clubs, so a restart or a re-run of a matchday never counts a match
+//! twice. A later score correction from Football-Data is not re-applied:
+//! replaying it could double count the match, which is worse than a missed
+//! correction.
 //!
 //! The update rule is ClubElo's published method:
 //!
@@ -129,11 +132,19 @@ pub struct MatchResult {
 /// incrementally: the matches already applied and the last season downloaded.
 /// [`crate::state::State::record_elo`] persists that progress separately from
 /// the ratings map, so a restart resumes instead of replaying the backfill.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default)]
 pub struct EloRatings {
     pub(crate) ratings: BTreeMap<String, f64>,
     pub(crate) applied: BTreeSet<String>,
     pub(crate) backfilled_through: Option<u16>,
+}
+
+/// Compares ratings only; incremental progress is persisted separately by
+/// [`crate::state::State`].
+impl PartialEq for EloRatings {
+    fn eq(&self, other: &Self) -> bool {
+        self.ratings == other.ratings
+    }
 }
 
 impl Serialize for EloRatings {
@@ -259,6 +270,7 @@ pub trait EloSite: Send + Sync {
 /// HTTP client for the Football-Data Ligue 1 archive.
 pub struct FootballDataClient {
     http: reqwest::Client,
+    base_url: String,
     cached: Mutex<EloRatings>,
 }
 
@@ -269,7 +281,7 @@ impl FootballDataClient {
     /// backfill completed, so ClubElo ratings cached by an older version are
     /// never mixed with ratings computed from Football-Data results.
     pub fn new(cached: EloRatings) -> Result<Self, EloError> {
-        let cached = if cached.backfilled_through.is_some() {
+        let cached = if cached.backfilled_through.is_some() && !cached.applied.is_empty() {
             cached
         } else {
             EloRatings::default()
@@ -280,8 +292,20 @@ impl FootballDataClient {
             .map_err(EloError::ClientBuild)?;
         Ok(Self {
             http,
+            base_url: FOOTBALL_DATA_URL.to_owned(),
             cached: Mutex::new(cached),
         })
+    }
+
+    // Test-only seam. Integration tests compile the library without
+    // `cfg(test)`, so the wiremock tests must stay in this module. Do not move
+    // them to `tests/` without making this constructor a deliberate public
+    // API.
+    #[cfg(test)]
+    fn with_base_url(cached: EloRatings, base_url: impl Into<String>) -> Result<Self, EloError> {
+        let mut client = Self::new(cached)?;
+        client.base_url = base_url.into();
+        Ok(client)
     }
 
     fn snapshot(&self) -> EloRatings {
@@ -298,10 +322,14 @@ impl FootballDataClient {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = ratings;
     }
 
+    fn season_url(&self, season: u16) -> String {
+        format!("{}{}", self.base_url, season_path(season))
+    }
+
     async fn fetch_season(&self, season: u16) -> Result<Vec<MatchResult>, EloError> {
         let response = self
             .http
-            .get(season_url(season))
+            .get(self.season_url(season))
             .header("accept", "text/csv")
             .send()
             .await
@@ -327,6 +355,7 @@ impl EloSite for FootballDataClient {
                 Ok(results) => applied += next.apply_results(results),
                 Err(error)
                     if season == target
+                        && is_backfill
                         && matches!(
                             error,
                             EloError::Status {
@@ -455,12 +484,8 @@ fn first_season_to_fetch(backfilled_through: Option<u16>, target: u16) -> u16 {
     backfilled_through.map_or(BACKFILL_FROM_SEASON, |season| season.min(target))
 }
 
-fn season_url(season: u16) -> String {
-    format!(
-        "{FOOTBALL_DATA_URL}/{:02}{:02}/F1.csv",
-        season % 100,
-        (season + 1) % 100
-    )
+fn season_path(season: u16) -> String {
+    format!("/{:02}{:02}/F1.csv", season % 100, (season + 1) % 100)
 }
 
 fn parse_season(season: u16, csv: &str) -> Result<Vec<MatchResult>, EloError> {
@@ -600,7 +625,14 @@ fn truncate_body(body: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
     use super::*;
+    use crate::state::{Mode, State};
 
     const CSV: &str = "\u{feff}Div,Date,Time,HomeTeam,AwayTeam,FTHG,FTAG,FTR\n\
         F1,21/08/2020,18:00,Bordeaux,Nantes,0,0,D\n\
@@ -608,8 +640,121 @@ mod tests {
         F1,23/08/2020,18:00,Lens,Lille,2,1,H\n\
         F1,32/13/2020,18:00,Brest,Lyon,1,0,H\n";
 
+    static NEXT_DIR: AtomicUsize = AtomicUsize::new(0);
+
     fn date(year: i32, month: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(year, month, day).expect("valid date")
+    }
+
+    fn temp_state_path() -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "mpp-autopilot-elo-{}-{}",
+            std::process::id(),
+            NEXT_DIR.fetch_add(1, AtomicOrdering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("state.json");
+        (dir, path)
+    }
+
+    fn season_csv(season: u16) -> String {
+        format!(
+            "Div,Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR\n\
+             F1,01/09/{season},Paris SG,Marseille,1,0,H\n"
+        )
+    }
+
+    async fn mount_season(server: &MockServer, season: u16) {
+        Mock::given(method("GET"))
+            .and(path(season_path(season)))
+            .respond_with(ResponseTemplate::new(200).set_body_string(season_csv(season)))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_restored_backfill_only_fetches_the_current_season() {
+        let server = MockServer::start().await;
+        let target = current_season(Utc::now().date_naive());
+        let seasons: Vec<u16> = (BACKFILL_FROM_SEASON..=target).collect();
+        let paths: Vec<String> = seasons.iter().copied().map(season_path).collect();
+
+        for season in seasons {
+            mount_season(&server, season).await;
+        }
+
+        let first_client =
+            FootballDataClient::with_base_url(EloRatings::default(), server.uri()).expect("client");
+        let first = first_client.fetch_ratings().await.expect("backfill");
+        assert!(first.rating("PSG").is_some());
+
+        let requests = server.received_requests().await.expect("recorded requests");
+        let first_paths: Vec<_> = requests.iter().map(|request| request.url.path()).collect();
+        assert_eq!(
+            first_paths,
+            paths.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+
+        let (dir, state_file) = temp_state_path();
+        let mut state = State::new(Mode::Dry);
+        state.record_elo(first.clone(), Utc::now());
+        state.save(&state_file).expect("save state");
+        let loaded = State::load(&state_file, Mode::Dry).expect("load state");
+        let _ = std::fs::remove_dir_all(dir);
+
+        let second_client =
+            FootballDataClient::with_base_url(loaded.cached_elo(), server.uri()).expect("client");
+        let second = second_client.fetch_ratings().await.expect("incremental");
+        assert_eq!(second, first);
+
+        let requests = server.received_requests().await.expect("recorded requests");
+        let later_paths: Vec<_> = requests[paths.len()..]
+            .iter()
+            .map(|request| request.url.path().to_owned())
+            .collect();
+        assert_eq!(later_paths, vec![season_path(target)]);
+    }
+
+    #[tokio::test]
+    async fn a_missing_current_season_fails_once_the_backfill_exists() {
+        let target = current_season(Utc::now().date_naive());
+
+        let backfill_server = MockServer::start().await;
+        for season in BACKFILL_FROM_SEASON..=target {
+            mount_season(&backfill_server, season).await;
+        }
+        let backfill =
+            FootballDataClient::with_base_url(EloRatings::default(), backfill_server.uri())
+                .expect("client")
+                .fetch_ratings()
+                .await
+                .expect("backfill");
+        assert!(backfill.rating("PSG").is_some());
+
+        let missing_server = MockServer::start().await;
+        for season in BACKFILL_FROM_SEASON..target {
+            mount_season(&missing_server, season).await;
+        }
+        let client =
+            FootballDataClient::with_base_url(backfill, missing_server.uri()).expect("client");
+        let error = client
+            .fetch_ratings()
+            .await
+            .expect_err("missing current season");
+
+        assert!(matches!(
+            error,
+            EloError::Status {
+                status: StatusCode::NOT_FOUND,
+                ..
+            }
+        ));
+        let requests = missing_server
+            .received_requests()
+            .await
+            .expect("recorded requests");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].url.path().to_owned(), season_path(target));
     }
 
     #[test]
@@ -677,15 +822,9 @@ mod tests {
     }
 
     #[test]
-    fn season_codes_match_the_archive_layout() {
-        assert_eq!(
-            season_url(2020),
-            "https://football-data.co.uk/mmz4281/2021/F1.csv"
-        );
-        assert_eq!(
-            season_url(2026),
-            "https://football-data.co.uk/mmz4281/2627/F1.csv"
-        );
+    fn season_paths_match_the_archive_layout() {
+        assert_eq!(season_path(2020), "/2021/F1.csv");
+        assert_eq!(season_path(2026), "/2627/F1.csv");
     }
 
     #[test]
