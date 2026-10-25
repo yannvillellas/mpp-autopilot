@@ -1,4 +1,4 @@
-//! Orchestrator behavior with fake MPP and ClubElo clients.
+//! Orchestrator behavior with fake MPP and Elo clients.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -195,7 +195,7 @@ impl EloSite for FakeElo {
         if self.fail.load(Ordering::Relaxed) {
             return Err(EloError::Status {
                 status: StatusCode::FORBIDDEN,
-                body: "forced Cloudflare challenge".to_owned(),
+                body: "forced ratings failure".to_owned(),
             });
         }
         Ok(self.ratings.clone())

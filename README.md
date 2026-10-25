@@ -1,9 +1,10 @@
 # MPP Autopilot
 
 MPP Autopilot is a Rust service that predicts Ligue 1 exact scores for
-[Mon Petit Prono](https://mpp.football). It combines [ClubElo](https://clubelo.com)
-ratings with the MPP quotations, computes the score with the highest expected
-points, and writes it to the MPP `general` contest.
+[Mon Petit Prono](https://mpp.football). It computes its own Elo ratings from
+[Football-Data](https://www.football-data.co.uk) Ligue 1 results, combines them
+with the MPP quotations, picks the score with the highest expected points, and
+writes it to the MPP `general` contest.
 
 ## Quick start
 

@@ -9,7 +9,7 @@ use chrono::Utc;
 use chrono_tz::Europe::Paris;
 use mpp_autopilot::cli::{self, Action, Command};
 use mpp_autopilot::config::{self, Config};
-use mpp_autopilot::elo::ClubEloClient;
+use mpp_autopilot::elo::{EloRatings, FootballDataClient};
 use mpp_autopilot::mpp::{MppApi, MppClient};
 use mpp_autopilot::service;
 use mpp_autopilot::state::{Mode, State};
@@ -94,7 +94,8 @@ fn log_startup(config: &Config) -> Result<()> {
 
 fn check(config: &Config, mode: Mode) -> Result<()> {
     let _mpp = MppClient::new(config.mpp_token.clone()).context("failed to build MPP client")?;
-    let _elo = ClubEloClient::new().context("failed to build ClubElo client")?;
+    let _elo = FootballDataClient::new(EloRatings::default())
+        .context("failed to build Football-Data client")?;
 
     if let Some(parent) = config.state_path.parent() {
         if !parent.as_os_str().is_empty() && !parent.exists() {
@@ -180,9 +181,10 @@ async fn list(config: &Config) -> Result<()> {
 
 async fn once(config: &Config, mode: Mode) -> Result<()> {
     let mpp = MppClient::new(config.mpp_token.clone()).context("failed to build MPP client")?;
-    let elo = ClubEloClient::new().context("failed to build ClubElo client")?;
     let state = State::load(&config.state_path, mode)
         .with_context(|| format!("failed to load state {}", config.state_path.display()))?;
+    let elo = FootballDataClient::new(state.cached_elo())
+        .context("failed to build Football-Data client")?;
 
     let report = service::run_once(
         mode,
@@ -209,9 +211,10 @@ async fn once(config: &Config, mode: Mode) -> Result<()> {
 
 async fn run_service(config: &Config, mode: Mode) -> Result<()> {
     let mpp = MppClient::new(config.mpp_token.clone()).context("failed to build MPP client")?;
-    let elo = ClubEloClient::new().context("failed to build ClubElo client")?;
     let state = State::load(&config.state_path, mode)
         .with_context(|| format!("failed to load state {}", config.state_path.display()))?;
+    let elo = FootballDataClient::new(state.cached_elo())
+        .context("failed to build Football-Data client")?;
 
     service::run_forever(
         mode,
