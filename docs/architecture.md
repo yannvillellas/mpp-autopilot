@@ -60,8 +60,8 @@ contains every upcoming Ligue 1 event, so a pass never makes one request per
 match. The key is read from `ODDS_API_KEY`; the service refuses to start
 without it. It is never logged or persisted, and request errors are stripped of
 their URL before they reach a log line. Each response also carries
-`x-requests-remaining` and `x-requests-used`; the client logs both at info once
-per request, when they are present.
+`x-requests-remaining` and `x-requests-used`; the client logs at info, once per
+request, whichever of the two headers is present.
 
 For each event, complete books are used as follows:
 

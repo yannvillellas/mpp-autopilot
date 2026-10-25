@@ -318,8 +318,8 @@ async fn check_response(response: Response) -> Result<Response, OddsError> {
     Ok(response)
 }
 
-/// Logs credit usage once per response when both quota headers are present.
-fn log_quota(headers: &HeaderMap) {
+/// Reads the quota headers that are present on a response.
+fn quota_headers(headers: &HeaderMap) -> (Option<&str>, Option<&str>) {
     let remaining = headers
         .get("x-requests-remaining")
         .and_then(|value| value.to_str().ok());
@@ -327,12 +327,20 @@ fn log_quota(headers: &HeaderMap) {
         .get("x-requests-used")
         .and_then(|value| value.to_str().ok());
 
-    if let (Some(remaining), Some(used)) = (remaining, used) {
-        info!(
+    (remaining, used)
+}
+
+/// Logs each quota header present on the response, once per fetch.
+fn log_quota(headers: &HeaderMap) {
+    match quota_headers(headers) {
+        (Some(remaining), Some(used)) => info!(
             requests_remaining = remaining,
             requests_used = used,
             "The Odds API quota"
-        );
+        ),
+        (Some(remaining), None) => info!(requests_remaining = remaining, "The Odds API quota"),
+        (None, Some(used)) => info!(requests_used = used, "The Odds API quota"),
+        (None, None) => {}
     }
 }
 
@@ -648,6 +656,8 @@ fn clean_name(value: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use reqwest::header::HeaderValue;
+
     use super::*;
 
     const RECORDED_RESPONSE: &str = include_str!("../tests/fixtures/ligue1_odds.json");
@@ -869,6 +879,50 @@ mod tests {
             .fetch_forecasts()
             .await
             .expect("forecasts with quota headers");
+
+        assert_eq!(forecasts.len(), 2);
+    }
+
+    #[test]
+    fn quota_headers_are_read_independently() {
+        let mut both = HeaderMap::new();
+        both.insert("x-requests-remaining", HeaderValue::from_static("499"));
+        both.insert("x-requests-used", HeaderValue::from_static("1"));
+        assert_eq!(quota_headers(&both), (Some("499"), Some("1")));
+
+        let mut remaining_only = HeaderMap::new();
+        remaining_only.insert("x-requests-remaining", HeaderValue::from_static("499"));
+        assert_eq!(quota_headers(&remaining_only), (Some("499"), None));
+
+        let mut used_only = HeaderMap::new();
+        used_only.insert("x-requests-used", HeaderValue::from_static("1"));
+        assert_eq!(quota_headers(&used_only), (None, Some("1")));
+
+        assert_eq!(quota_headers(&HeaderMap::new()), (None, None));
+    }
+
+    #[tokio::test]
+    async fn client_accepts_a_single_quota_header() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v4/sports/soccer_france_ligue_one/odds"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("x-requests-remaining", "499")
+                    .set_body_string(RECORDED_RESPONSE),
+            )
+            .mount(&server)
+            .await;
+
+        let client = OddsApiClient::with_base_url("test-key", format!("{}/v4", server.uri()))
+            .expect("client");
+        let forecasts = client
+            .fetch_forecasts()
+            .await
+            .expect("forecasts with one quota header");
 
         assert_eq!(forecasts.len(), 2);
     }
