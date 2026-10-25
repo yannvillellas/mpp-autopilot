@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
+use mpp_autopilot::elo::EloRatings;
 use mpp_autopilot::model::Score;
 use mpp_autopilot::state::{MatchState, Mode, State, StateError, Trigger};
 
@@ -91,6 +92,43 @@ fn state_roundtrips_through_atomic_file() {
     assert!(!dir.path().join("state.json.tmp").exists());
     let loaded = State::load(&path, Mode::Write).expect("load state");
     assert_eq!(loaded, state);
+}
+
+#[test]
+fn elo_cache_roundtrips_through_the_state_file() {
+    let dir = TestDir::new();
+    let path = dir.state_path();
+    let mut state = State::new(Mode::Write);
+    state.record_elo(
+        EloRatings::from_pairs([("Paris SG", 1900.0), ("Marseille", 1700.0)]),
+        at(19, 5),
+    );
+
+    state.save(&path).expect("save state");
+
+    let loaded = State::load(&path, Mode::Write).expect("load state");
+    let cached = loaded.elo.as_ref().expect("cached ratings");
+    assert_eq!(cached.fetched_at, at(19, 5));
+    assert_eq!(cached.ratings.rating("PSG"), Some(1900.0));
+    assert_eq!(cached.ratings.rating("Marseille"), Some(1700.0));
+}
+
+#[test]
+fn elo_cache_uses_a_readable_state_schema() {
+    let mut state = State::new(Mode::Dry);
+    state.record_elo(EloRatings::from_pairs([("Paris SG", 1900.0)]), at(19, 5));
+
+    let json = serde_json::to_value(&state).expect("serialize state");
+
+    assert_eq!(json["elo"]["fetched_at"], "2026-10-19T05:00:00Z");
+    assert_eq!(json["elo"]["ratings"]["paris sg"], 1900.0);
+}
+
+#[test]
+fn absent_elo_cache_is_omitted_from_the_state_file() {
+    let json = serde_json::to_value(State::new(Mode::Dry)).expect("serialize state");
+
+    assert!(json.get("elo").is_none());
 }
 
 #[test]
@@ -263,6 +301,7 @@ fn legacy_state_keys_are_still_accepted() {
         Some(at(19, 5) + Duration::seconds(1))
     );
     assert_eq!(saved.triggers.len(), 3);
+    assert_eq!(state.elo, None);
 }
 
 #[test]

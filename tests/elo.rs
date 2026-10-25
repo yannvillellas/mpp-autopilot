@@ -31,6 +31,20 @@ fn duplicate_pairs_keep_the_last_value() {
 }
 
 #[test]
+fn deserialized_ratings_are_normalized_and_validated() {
+    let ratings: EloRatings = serde_json::from_str(
+        r#"{ " Paris-SG ": 1800.0, "Lens": -1.0, "Nice": 1600.0, "Angers": 0.0 }"#,
+    )
+    .expect("deserialize ratings");
+
+    assert_eq!(ratings.len(), 2);
+    assert_eq!(ratings.rating("PSG"), Some(1800.0));
+    assert_eq!(ratings.rating("Nice"), Some(1600.0));
+    assert_eq!(ratings.rating("Lens"), None);
+    assert_eq!(ratings.rating("Angers"), None);
+}
+
+#[test]
 fn transient_errors_are_classified() {
     assert!(
         EloError::Status {

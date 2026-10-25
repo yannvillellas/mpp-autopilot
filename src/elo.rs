@@ -1,9 +1,10 @@
 //! ClubElo ratings for the current Ligue 1 clubs.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use reqwest::{Response, StatusCode};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -16,9 +17,20 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_ERROR_BODY_CHARS: usize = 512;
 
 /// ClubElo ratings indexed by normalized club name.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize)]
+#[serde(transparent)]
 pub struct EloRatings {
-    ratings: HashMap<String, f64>,
+    ratings: BTreeMap<String, f64>,
+}
+
+impl<'de> Deserialize<'de> for EloRatings {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let ratings = BTreeMap::<String, f64>::deserialize(deserializer)?;
+        Ok(Self::from_pairs(ratings))
+    }
 }
 
 impl EloRatings {
@@ -33,7 +45,7 @@ impl EloRatings {
         I: IntoIterator<Item = (S, f64)>,
         S: AsRef<str>,
     {
-        let mut ratings = HashMap::new();
+        let mut ratings = BTreeMap::new();
 
         for (name, elo) in pairs {
             if !elo.is_finite() || elo <= 0.0 {

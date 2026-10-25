@@ -8,6 +8,9 @@
 //! missing score is worse than a redundant PATCH.
 //! The persistent state remains the scheduler memory: which triggers already
 //! ran, the kickoff of each match, and an audit trail of what the bot wrote.
+//! It also keeps the last successful ClubElo ratings, so a fetch failure does
+//! not drop the whole pass; ratings reused from that cache are logged with
+//! their age.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -17,7 +20,7 @@ use chrono::{DateTime, Utc};
 use thiserror::Error;
 use tracing::{info, warn};
 
-use crate::elo::{EloError, EloSite};
+use crate::elo::{EloError, EloRatings, EloSite};
 use crate::model::{self, Prediction, Score};
 use crate::mpp::{Fixture, MppApi, MppError, Snapshot};
 use crate::scheduler;
@@ -70,6 +73,10 @@ pub enum RunError {
     /// A trigger pass ran before any daily snapshot was loaded.
     #[error("daily snapshot required before a trigger pass")]
     MissingSnapshot,
+    /// Cached ClubElo ratings do not cover a fixture, so a fresh fetch is
+    /// required before the trigger can be consumed.
+    #[error("cached ClubElo ratings are missing a club rating")]
+    CachedEloIncomplete,
 }
 
 impl RunError {
@@ -78,6 +85,7 @@ impl RunError {
         match self {
             Self::Mpp(error) => error.is_transient(),
             Self::Elo(error) => error.is_transient(),
+            Self::CachedEloIncomplete => true,
             Self::State(_) | Self::MissingSnapshot => false,
         }
     }
@@ -234,7 +242,7 @@ impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E> {
             return Ok(report);
         }
 
-        let ratings = self.elo.fetch_ratings().await?;
+        let (ratings, ratings_source) = self.ratings(now).await?;
         let mut first_error: Option<RunError> = None;
 
         for (match_id, trigger, fixture) in ready {
@@ -268,6 +276,20 @@ impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E> {
                 ratings.rating(home_canonical),
                 ratings.rating(away_canonical),
             ) else {
+                if ratings_source.is_cached() {
+                    warn!(
+                        match_id = %match_id,
+                        trigger = ?trigger,
+                        home = %fixture.home.name,
+                        away = %fixture.away.name,
+                        "missing ClubElo rating in the cached snapshot; trigger left pending"
+                    );
+                    if first_error.is_none() {
+                        first_error = Some(RunError::CachedEloIncomplete);
+                    }
+                    continue;
+                }
+
                 warn!(
                     match_id = %match_id,
                     trigger = ?trigger,
@@ -301,10 +323,13 @@ impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E> {
                 log_trigger(
                     &fixture,
                     trigger,
-                    home_elo,
-                    away_elo,
+                    MatchElo {
+                        home: home_elo,
+                        away: away_elo,
+                    },
                     &prediction,
                     RemoteForecast::NotRead,
+                    ratings_source,
                     "dry_run",
                 );
                 self.mark_trigger(&match_id, trigger, now)?;
@@ -331,10 +356,13 @@ impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E> {
                 log_trigger(
                     &fixture,
                     trigger,
-                    home_elo,
-                    away_elo,
+                    MatchElo {
+                        home: home_elo,
+                        away: away_elo,
+                    },
                     &prediction,
                     remote,
+                    ratings_source,
                     "unchanged",
                 );
                 self.mark_trigger(&match_id, trigger, now)?;
@@ -378,10 +406,13 @@ impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E> {
                     log_trigger(
                         &fixture,
                         trigger,
-                        home_elo,
-                        away_elo,
+                        MatchElo {
+                            home: home_elo,
+                            away: away_elo,
+                        },
                         &prediction,
                         remote,
+                        ratings_source,
                         "written",
                     );
                     self.state.save(&self.state_path)?;
@@ -392,10 +423,13 @@ impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E> {
                     log_trigger(
                         &fixture,
                         trigger,
-                        home_elo,
-                        away_elo,
+                        MatchElo {
+                            home: home_elo,
+                            away: away_elo,
+                        },
                         &prediction,
                         remote,
+                        ratings_source,
                         "write_failed",
                     );
                     warn!(
@@ -419,10 +453,13 @@ impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E> {
                     log_trigger(
                         &fixture,
                         trigger,
-                        home_elo,
-                        away_elo,
+                        MatchElo {
+                            home: home_elo,
+                            away: away_elo,
+                        },
                         &prediction,
                         remote,
+                        ratings_source,
                         "write_failed",
                     );
                     warn!(
@@ -443,6 +480,46 @@ impl<'a, M: MppApi, E: EloSite> Orchestrator<'a, M, E> {
         }
 
         Ok(report)
+    }
+
+    /// Fetches the ClubElo ratings, reusing the last successful snapshot when
+    /// the fetch fails.
+    async fn ratings(
+        &mut self,
+        now: DateTime<Utc>,
+    ) -> Result<(EloRatings, RatingsSource), RunError> {
+        match self.elo.fetch_ratings().await {
+            Ok(ratings) => {
+                self.state.record_elo(ratings.clone(), now);
+                self.state.save(&self.state_path)?;
+                Ok((ratings, RatingsSource::Fresh))
+            }
+            Err(error) => {
+                let Some(cached) = self
+                    .state
+                    .elo
+                    .as_ref()
+                    .filter(|cached| !cached.ratings.is_empty())
+                else {
+                    return Err(error.into());
+                };
+                let age_seconds = now
+                    .signed_duration_since(cached.fetched_at)
+                    .num_seconds()
+                    .max(0);
+                warn!(
+                    error = %error,
+                    fetched_at = %cached.fetched_at,
+                    age_seconds,
+                    ratings = cached.ratings.len(),
+                    "ClubElo fetch failed; using the last successful ratings"
+                );
+                Ok((
+                    cached.ratings.clone(),
+                    RatingsSource::Cached { age_seconds },
+                ))
+            }
+        }
     }
 
     /// Runs one daily fetch followed by every trigger due at `now`.
@@ -501,13 +578,52 @@ impl fmt::Display for RemoteForecast {
     }
 }
 
+/// Elo ratings used for one fixture.
+#[derive(Debug, Clone, Copy)]
+struct MatchElo {
+    home: f64,
+    away: f64,
+}
+
+/// Origin of the Elo ratings used by a trigger pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RatingsSource {
+    /// Fetched during this pass.
+    Fresh,
+    /// Reused from the last successful fetch.
+    Cached {
+        /// Snapshot age at the start of the pass.
+        age_seconds: i64,
+    },
+}
+
+impl RatingsSource {
+    fn is_cached(self) -> bool {
+        matches!(self, Self::Cached { .. })
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Fresh => "fresh",
+            Self::Cached { .. } => "cache",
+        }
+    }
+
+    fn age_seconds(self) -> i64 {
+        match self {
+            Self::Fresh => 0,
+            Self::Cached { age_seconds } => age_seconds,
+        }
+    }
+}
+
 fn log_trigger(
     fixture: &Fixture,
     trigger: Trigger,
-    home_elo: f64,
-    away_elo: f64,
+    elo: MatchElo,
     prediction: &Prediction,
     remote: RemoteForecast,
+    ratings: RatingsSource,
     status: &'static str,
 ) {
     info!(
@@ -516,8 +632,8 @@ fn log_trigger(
         away = %fixture.away.name,
         kickoff = %fixture.kickoff,
         trigger = ?trigger,
-        home_elo,
-        away_elo,
+        home_elo = elo.home,
+        away_elo = elo.away,
         odds_home = fixture.odds.home,
         odds_draw = fixture.odds.draw,
         odds_away = fixture.odds.away,
@@ -532,6 +648,8 @@ fn log_trigger(
         recommendation = ?prediction.recommendation,
         recommendation_ev = prediction.recommendation_ev,
         remote = %remote,
+        elo_source = ratings.label(),
+        elo_age_seconds = ratings.age_seconds(),
         status,
         "MPP trigger"
     );
@@ -561,5 +679,19 @@ mod tests {
         assert_eq!(RemoteForecast::NotRead.score(), None);
         assert_eq!(RemoteForecast::Unreadable.score(), None);
         assert_eq!(RemoteForecast::Absent.score(), None);
+    }
+
+    #[test]
+    fn ratings_source_reports_freshness() {
+        assert_eq!(RatingsSource::Fresh.label(), "fresh");
+        assert_eq!(RatingsSource::Fresh.age_seconds(), 0);
+        assert_eq!(
+            RatingsSource::Cached { age_seconds: 3_600 }.label(),
+            "cache"
+        );
+        assert_eq!(
+            RatingsSource::Cached { age_seconds: 3_600 }.age_seconds(),
+            3_600
+        );
     }
 }

@@ -1,4 +1,4 @@
-//! Persistent state for match triggers and submitted scores.
+//! Persistent state for match triggers, submitted scores and the Elo cache.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -9,6 +9,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::elo::EloRatings;
 use crate::model::Score;
 
 /// Matches whose kickoff is older than this many days are purged.
@@ -50,13 +51,16 @@ impl Trigger {
     pub const ALL: [Self; 3] = [Self::Publish, Self::T60, Self::T5];
 }
 
-/// Persisted state shared by all matches.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Persisted state shared by all matches and the ClubElo cache.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct State {
     /// Last execution mode.
     pub mode: Mode,
     /// Match state, keyed by MPP match id.
     pub matches: BTreeMap<String, MatchState>,
+    /// Last successfully fetched ClubElo ratings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elo: Option<CachedElo>,
 }
 
 impl State {
@@ -65,7 +69,16 @@ impl State {
         Self {
             mode,
             matches: BTreeMap::new(),
+            elo: None,
         }
+    }
+
+    /// Records the ratings from a successful ClubElo fetch.
+    pub fn record_elo(&mut self, ratings: EloRatings, at: DateTime<Utc>) {
+        self.elo = Some(CachedElo {
+            fetched_at: at,
+            ratings,
+        });
     }
 
     /// Loads the state file, or starts fresh when it does not exist.
@@ -129,6 +142,15 @@ impl State {
         let cutoff = now - Duration::days(PURGE_AFTER_DAYS);
         self.matches.retain(|_, state| state.kickoff >= cutoff);
     }
+}
+
+/// Last successfully fetched ClubElo ratings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CachedElo {
+    /// Time of the fetch that produced these ratings.
+    pub fetched_at: DateTime<Utc>,
+    /// Ratings indexed by normalized club name.
+    pub ratings: EloRatings,
 }
 
 /// Persisted state for one match.

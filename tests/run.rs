@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use mpp_autopilot::elo::{EloError, EloRatings, EloSite};
@@ -168,6 +168,7 @@ impl MppApi for FakeMpp {
 struct FakeElo {
     ratings: EloRatings,
     calls: AtomicUsize,
+    fail: AtomicBool,
 }
 
 impl FakeElo {
@@ -175,7 +176,12 @@ impl FakeElo {
         Self {
             ratings,
             calls: AtomicUsize::new(0),
+            fail: AtomicBool::new(false),
         }
+    }
+
+    fn fail(&self) {
+        self.fail.store(true, Ordering::Relaxed);
     }
 
     fn calls(&self) -> usize {
@@ -186,6 +192,12 @@ impl FakeElo {
 impl EloSite for FakeElo {
     async fn fetch_ratings(&self) -> Result<EloRatings, EloError> {
         self.calls.fetch_add(1, Ordering::Relaxed);
+        if self.fail.load(Ordering::Relaxed) {
+            return Err(EloError::Status {
+                status: StatusCode::FORBIDDEN,
+                body: "forced Cloudflare challenge".to_owned(),
+            });
+        }
         Ok(self.ratings.clone())
     }
 }
@@ -773,4 +785,142 @@ async fn permanent_write_failure_continues_with_other_matches() {
     for match_id in ["match-1", "match-2"] {
         assert!(runner.state().matches[match_id].is_trigger_done(Trigger::Publish));
     }
+}
+
+#[tokio::test]
+async fn elo_fetch_failure_uses_the_last_successful_ratings() {
+    let fetched_at = now() - Duration::days(2);
+    let mut state = state_with_match(Mode::Write, kickoff());
+    state.record_elo(ratings(), fetched_at);
+
+    let mpp = FakeMpp::new(snapshot(kickoff()));
+    let elo = FakeElo::new(EloRatings::default());
+    elo.fail();
+    let dir = TestDir::new();
+    let path = dir.path().join("state.json");
+    let mut runner = Orchestrator::new(&mpp, &elo, Mode::Write, state, path.clone());
+
+    let report = runner.execute_once(now()).await.expect("cached ratings");
+
+    assert_eq!(report.triggers, 1);
+    assert_eq!(report.writes, 1);
+    assert_eq!(report.skipped, 0);
+    assert_eq!(elo.calls(), 1);
+    assert_eq!(
+        mpp.writes(),
+        vec![("match-1".to_owned(), Score { home: 1, away: 1 })]
+    );
+    assert!(runner.state().matches["match-1"].is_trigger_done(Trigger::Publish));
+
+    let cached = runner.state().elo.as_ref().expect("cached ratings");
+    assert_eq!(cached.fetched_at, fetched_at);
+    assert_eq!(cached.ratings, ratings());
+
+    let loaded = State::load(&path, Mode::Write).expect("load state");
+    assert_eq!(
+        loaded.elo.as_ref().expect("persisted cache").fetched_at,
+        fetched_at
+    );
+}
+
+#[tokio::test]
+async fn elo_fetch_failure_without_a_cache_fails_the_pass() {
+    let mpp = FakeMpp::new(snapshot(kickoff()));
+    let elo = FakeElo::new(ratings());
+    elo.fail();
+    let dir = TestDir::new();
+    let path = dir.path().join("state.json");
+    let mut runner = Orchestrator::new(
+        &mpp,
+        &elo,
+        Mode::Write,
+        state_with_match(Mode::Write, kickoff()),
+        path,
+    );
+
+    let error = runner.execute_once(now()).await.expect_err("no cache");
+
+    assert!(matches!(error, RunError::Elo(_)));
+    assert_eq!(elo.calls(), 1);
+    assert_eq!(mpp.reads(), 0);
+    assert!(mpp.writes().is_empty());
+    assert!(!runner.state().matches["match-1"].is_trigger_done(Trigger::Publish));
+}
+
+#[tokio::test]
+async fn empty_cached_ratings_are_treated_as_absent() {
+    let mut state = state_with_match(Mode::Write, kickoff());
+    state.record_elo(EloRatings::default(), now() - Duration::days(1));
+
+    let mpp = FakeMpp::new(snapshot(kickoff()));
+    let elo = FakeElo::new(ratings());
+    elo.fail();
+    let dir = TestDir::new();
+    let path = dir.path().join("state.json");
+    let mut runner = Orchestrator::new(&mpp, &elo, Mode::Write, state, path);
+
+    let error = runner.execute_once(now()).await.expect_err("empty cache");
+
+    assert!(matches!(error, RunError::Elo(_)));
+    assert!(mpp.writes().is_empty());
+    assert!(!runner.state().matches["match-1"].is_trigger_done(Trigger::Publish));
+}
+
+#[tokio::test]
+async fn incomplete_cached_ratings_leave_the_trigger_pending() {
+    let mut state = state_with_match(Mode::Write, kickoff());
+    state.record_elo(
+        EloRatings::from_pairs([("Paris SG", 1684.0)]),
+        now() - Duration::days(1),
+    );
+
+    let mpp = FakeMpp::new(snapshot(kickoff()));
+    let elo = FakeElo::new(ratings());
+    elo.fail();
+    let dir = TestDir::new();
+    let path = dir.path().join("state.json");
+    let mut runner = Orchestrator::new(&mpp, &elo, Mode::Write, state, path);
+
+    let error = runner
+        .execute_once(now())
+        .await
+        .expect_err("incomplete cache");
+
+    assert!(matches!(error, RunError::CachedEloIncomplete));
+    assert!(mpp.writes().is_empty());
+    assert!(!runner.state().matches["match-1"].is_trigger_done(Trigger::Publish));
+}
+
+#[tokio::test]
+async fn successful_elo_fetch_is_cached_for_later_failures() {
+    let mpp = FakeMpp::new(snapshot(kickoff()));
+    let elo = FakeElo::new(ratings());
+    let dir = TestDir::new();
+    let path = dir.path().join("state.json");
+    let mut state = state_with_match(Mode::Write, kickoff());
+    state.record_elo(
+        EloRatings::from_pairs([("Paris SG", 1000.0), ("Marseille", 1000.0)]),
+        now() - Duration::days(30),
+    );
+    let mut runner = Orchestrator::new(&mpp, &elo, Mode::Write, state, path.clone());
+
+    runner.execute_once(now()).await.expect("first run");
+
+    let cached = runner.state().elo.as_ref().expect("cached ratings");
+    assert_eq!(cached.fetched_at, now());
+    assert_eq!(cached.ratings, ratings());
+
+    let loaded = State::load(&path, Mode::Write).expect("load state");
+    elo.fail();
+    let mut runner = Orchestrator::new(&mpp, &elo, Mode::Write, loaded, path);
+
+    let report = runner
+        .execute_once(kickoff() - Duration::minutes(60))
+        .await
+        .expect("cached ratings after restart");
+
+    assert_eq!(report.triggers, 1);
+    assert_eq!(report.writes, 0);
+    assert_eq!(report.unchanged, 1);
+    assert!(runner.state().matches["match-1"].is_trigger_done(Trigger::T60));
 }
