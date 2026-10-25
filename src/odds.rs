@@ -21,10 +21,11 @@ use std::fmt;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use reqwest::header::HeaderMap;
 use reqwest::{Response, StatusCode};
 use serde::Deserialize;
 use thiserror::Error;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::model::Lambdas;
 use crate::teams;
@@ -133,6 +134,7 @@ impl OddsApiClient {
             .await
             .map_err(network_error)?;
 
+        log_quota(response.headers());
         let response = check_response(response).await?;
         response.text().await.map_err(network_error)
     }
@@ -314,6 +316,24 @@ async fn check_response(response: Response) -> Result<Response, OddsError> {
         });
     }
     Ok(response)
+}
+
+/// Logs credit usage once per response when both quota headers are present.
+fn log_quota(headers: &HeaderMap) {
+    let remaining = headers
+        .get("x-requests-remaining")
+        .and_then(|value| value.to_str().ok());
+    let used = headers
+        .get("x-requests-used")
+        .and_then(|value| value.to_str().ok());
+
+    if let (Some(remaining), Some(used)) = (remaining, used) {
+        info!(
+            requests_remaining = remaining,
+            requests_used = used,
+            "The Odds API quota"
+        );
+    }
 }
 
 fn truncate_body(body: &str) -> String {
@@ -824,5 +844,32 @@ mod tests {
 
         assert_eq!(forecasts.len(), 2);
         assert_eq!(server.received_requests().await.expect("requests").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn client_accepts_quota_headers() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v4/sports/soccer_france_ligue_one/odds"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("x-requests-remaining", "499")
+                    .insert_header("x-requests-used", "1")
+                    .set_body_string(RECORDED_RESPONSE),
+            )
+            .mount(&server)
+            .await;
+
+        let client = OddsApiClient::with_base_url("test-key", format!("{}/v4", server.uri()))
+            .expect("client");
+        let forecasts = client
+            .fetch_forecasts()
+            .await
+            .expect("forecasts with quota headers");
+
+        assert_eq!(forecasts.len(), 2);
     }
 }
