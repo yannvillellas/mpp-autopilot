@@ -32,7 +32,6 @@ Every trigger log carries the source and its provenance:
 | ----------------- | --------------------------------------------------------------- |
 | `source`          | `market`, `elo` or `elo_cached`.                                |
 | `observed_at`     | Market observation time, or the time of the Elo fetch/snapshot. |
-| `elo_source`      | `fresh`, `cache` or `not_used` when the market answered.        |
 | `elo_age_seconds` | Age of the cached Elo snapshot; `0` for fresh or market data.   |
 
 Market `observed_at` is the oldest market-level `last_update` among the selected
@@ -160,7 +159,7 @@ The current season's file is published a day or two after the matchday. That
 only delays the newest results; it never fails a pass. A missing current-season
 file is tolerated during the one-time backfill, where the archived seasons
 still produce ratings. Once a backfill exists, the same 404 fails the fetch and
-the Elo cache answers with its real age, logged as `elo_source=cache`.
+the Elo cache answers with `source=elo_cached` and its real age.
 
 ## Elo cache
 
@@ -171,10 +170,9 @@ failing:
 - The snapshot is replaced after each successful fetch.
 - Cached ratings are still used to compute and write predictions, and the
   trigger is marked as done.
-- For Elo answers, every trigger log carries `elo_source` (`fresh` or
-  `cache`) and `elo_age_seconds`, in addition to `source` (`elo` or
-  `elo_cached`) and `observed_at`. The fallback also logs the fetch error,
-  `fetched_at` and the snapshot age.
+- For Elo answers, every trigger log carries `elo_age_seconds`, in addition
+  to `source` (`elo` or `elo_cached`) and `observed_at`. The fallback also
+  logs the fetch error, `fetched_at` and the snapshot age.
 - If the cached snapshot misses a club, that trigger stays pending so a later
   fetch can retry it; the other matches still run.
 - Without a cached snapshot (first run), the Elo path fails the pass and the

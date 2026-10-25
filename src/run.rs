@@ -720,13 +720,6 @@ impl RatingsSource {
         matches!(self, Self::Cached { .. })
     }
 
-    fn label(self) -> &'static str {
-        match self {
-            Self::Fresh => "fresh",
-            Self::Cached { .. } => "cache",
-        }
-    }
-
     fn age_seconds(self) -> i64 {
         match self {
             Self::Fresh => 0,
@@ -780,13 +773,6 @@ impl ForecastSource {
         }
     }
 
-    fn elo_source(self) -> &'static str {
-        match self {
-            Self::Market { .. } => "not_used",
-            Self::Elo { ratings, .. } => ratings.label(),
-        }
-    }
-
     fn elo_age_seconds(self) -> i64 {
         match self {
             Self::Market { .. } => 0,
@@ -828,7 +814,6 @@ fn log_trigger(
         remote = %remote,
         source = source.label(),
         observed_at = %source.observed_at(),
-        elo_source = source.elo_source(),
         elo_age_seconds = source.elo_age_seconds(),
         status,
         "MPP trigger"
@@ -871,9 +856,7 @@ mod tests {
             age_seconds: 3_600,
         };
 
-        assert_eq!(RatingsSource::Fresh.label(), "fresh");
         assert_eq!(RatingsSource::Fresh.age_seconds(), 0);
-        assert_eq!(cached.label(), "cache");
         assert_eq!(cached.age_seconds(), 3_600);
         assert_eq!(cached.observed_at(fetched_at), fetched_at);
     }
@@ -897,11 +880,8 @@ mod tests {
         };
 
         assert_eq!(market.label(), "market");
-        assert_eq!(market.elo_source(), "not_used");
         assert_eq!(fresh.label(), "elo");
-        assert_eq!(fresh.elo_source(), "fresh");
         assert_eq!(cached.label(), "elo_cached");
-        assert_eq!(cached.elo_source(), "cache");
         assert_eq!(cached.observed_at(), observed_at);
     }
 }

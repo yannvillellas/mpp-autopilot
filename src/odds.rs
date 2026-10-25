@@ -24,6 +24,7 @@ use chrono::{DateTime, Utc};
 use reqwest::{Response, StatusCode};
 use serde::Deserialize;
 use thiserror::Error;
+use tracing::warn;
 
 use crate::model::Lambdas;
 use crate::teams;
@@ -185,8 +186,8 @@ pub enum SolveError {
     /// The input probability is not strictly between 0 and 1.
     #[error("probabilities must be strictly between 0 and 1")]
     InvalidProbabilities,
-    /// The one-dimensional solve did not converge.
-    #[error("the expected-goal solve did not converge")]
+    /// The probabilities are inconsistent with a Poisson goal distribution.
+    #[error("the expected-goal solve has no solution")]
     NoSolution,
 }
 
@@ -408,7 +409,23 @@ impl Event {
 
     fn forecast(&self, fallback: DateTime<Utc>) -> Option<MarketForecast> {
         let (probabilities, observed_at) = self.select(fallback)?;
-        let lambdas = expected_goals(probabilities.home, probabilities.over).ok()?;
+        let lambdas = match expected_goals(probabilities.home, probabilities.over) {
+            Ok(lambdas) => lambdas,
+            Err(error) => {
+                warn!(
+                    home_team = %self.home_team,
+                    away_team = %self.away_team,
+                    commence_time = %self.commence_time,
+                    p_home = probabilities.home,
+                    p_draw = probabilities.draw,
+                    p_away = probabilities.away,
+                    p_over = probabilities.over,
+                    error = %error,
+                    "market odds could not be converted to expected goals; event ignored"
+                );
+                return None;
+            }
+        };
 
         Some(MarketForecast {
             commence_time: self.commence_time,
@@ -713,6 +730,42 @@ mod tests {
         // pOver2.5 = 0.01 pins the total near 0.44, where even giving every
         // goal to the home side wins only P(total > 0) ~ 0.35 of the time.
         assert_eq!(expected_goals(0.99, 0.01), Err(SolveError::NoSolution));
+    }
+
+    #[test]
+    fn an_inconsistent_book_is_ignored() {
+        let body = r#"[
+          {
+            "commence_time": "2026-10-25T16:15:00Z",
+            "home_team": "Angers",
+            "away_team": "Lorient",
+            "bookmakers": [
+              {
+                "key": "inconsistent",
+                "markets": [
+                  {
+                    "key": "h2h",
+                    "outcomes": [
+                      { "name": "Angers", "price": 1.02 },
+                      { "name": "Draw", "price": 100.0 },
+                      { "name": "Lorient", "price": 100.0 }
+                    ]
+                  },
+                  {
+                    "key": "totals",
+                    "outcomes": [
+                      { "name": "Over", "point": 2.5, "price": 20.0 },
+                      { "name": "Under", "point": 2.5, "price": 1.02 }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]"#;
+        let events = parse_events(body).expect("parse response");
+
+        assert!(events[0].forecast(fallback()).is_none());
     }
 
     #[test]
