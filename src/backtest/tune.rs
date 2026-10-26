@@ -295,10 +295,16 @@ impl TuneReport {
             "market / pinnacle closing: exact {:.4}  n={}  ({} fit matches)",
             self.market.exact, self.market.n, self.fit_matches
         );
+        let best_exact = self
+            .candidates
+            .iter()
+            .map(|candidate| candidate.metrics.exact)
+            .fold(f64::INFINITY, f64::min);
         println!();
         println!(
-            "{:>4} {:>10} {:>4} {:>10} {:>3} {:>4} {:>11} {:>12} {:>12} {:>8} {:>4} {:>9} {:>22} {:>7}",
+            "{:>4} {:>4} {:>10} {:>4} {:>10} {:>3} {:>4} {:>11} {:>12} {:>12} {:>8} {:>4} {:>9} {:>22} {:>7}",
             "rank",
+            "near",
             "source",
             "iter",
             "state",
@@ -319,9 +325,15 @@ impl TuneReport {
                 || ("—".to_owned(), "not fitted".to_owned()),
                 |fit| (fit.iterations.to_string(), fit.status.label().to_owned()),
             );
+            let near = if within_noise(candidate.metrics.exact, best_exact) {
+                "~"
+            } else {
+                ""
+            };
             println!(
-                "{:>4} {:>10} {:>4} {:>10} {:>3.0} {:>4.0} {:>11.4} {:>12.6} {:>12.6} {:>8.4} {:>4} {:>9} {:>22} {:>7}",
+                "{:>4} {:>4} {:>10} {:>4} {:>10} {:>3.0} {:>4.0} {:>11.4} {:>12.6} {:>12.6} {:>8.4} {:>4} {:>9} {:>22} {:>7}",
                 rank + 1,
+                near,
                 candidate.source.label(),
                 iterations,
                 state,
@@ -337,6 +349,9 @@ impl TuneReport {
                 paired
             );
         }
+        println!(
+            "~ = exact within {NOISE_FLOOR:.2} nat of the best; the order of these rows is not a result"
+        );
         let not_converged = self
             .candidates
             .iter()
@@ -354,6 +369,10 @@ impl TuneReport {
             "noise floor: {NOISE_FLOOR:.2} nat; a difference below it, or a 95% CI containing 0, is not a result"
         );
     }
+}
+
+fn within_noise(exact: f64, best: f64) -> bool {
+    exact - best < NOISE_FLOOR
 }
 
 /// Errors returned while tuning.
@@ -805,6 +824,13 @@ mod tests {
             assert!((conversion.home - model.home).abs() < 1e-12);
             assert!((conversion.away - model.away).abs() < 1e-12);
         }
+    }
+
+    #[test]
+    fn the_noise_marker_uses_the_configured_floor() {
+        assert!(within_noise(3.035, 3.035));
+        assert!(within_noise(3.044, 3.035));
+        assert!(!within_noise(3.046, 3.035));
     }
 
     #[test]
