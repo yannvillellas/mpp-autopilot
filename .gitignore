@@ -2,3 +2,4 @@
 .env
 /state.json
 /state.json.tmp
+/backtest-data/

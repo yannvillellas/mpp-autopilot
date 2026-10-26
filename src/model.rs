@@ -18,7 +18,8 @@ pub const MAX_GOALS: usize = 6;
 /// MPP bonus points awarded for an exact score.
 pub const FLAT_BONUS: f64 = 30.0;
 
-const SCORES: usize = MAX_GOALS + 1;
+/// Number of goal counts per team in the score grid.
+pub const SCORES: usize = MAX_GOALS + 1;
 
 /// Match outcome from the home team's perspective.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -267,7 +268,16 @@ fn build_prediction(lambdas: Lambdas, odds: Odds) -> Result<Prediction, ModelErr
     })
 }
 
-fn score_matrix(lambdas: Lambdas) -> Result<[[f64; SCORES]; SCORES], ModelError> {
+/// Returns the normalized exact-score grid used by [`predict_from_lambdas`].
+///
+/// The grid is indexed by home goals and then away goals, in `0..=MAX_GOALS`.
+/// Probabilities are normalized over that grid, so they sum to one.
+pub fn score_matrix(lambdas: Lambdas) -> Result<[[f64; SCORES]; SCORES], ModelError> {
+    validate_lambdas(lambdas)?;
+    build_score_matrix(lambdas)
+}
+
+fn build_score_matrix(lambdas: Lambdas) -> Result<[[f64; SCORES]; SCORES], ModelError> {
     let mut matrix = [[0.0; SCORES]; SCORES];
     let mut total = 0.0;
 

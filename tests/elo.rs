@@ -1,7 +1,7 @@
 //! Public Elo rating index, update rule and error behavior.
 
 use chrono::NaiveDate;
-use mpp_autopilot::elo::{EloError, EloRatings, MatchResult};
+use mpp_autopilot::elo::{BASE_K, EloError, EloRatings, HFA, MatchResult};
 use reqwest::StatusCode;
 
 fn date(month: u32, day: u32) -> NaiveDate {
@@ -93,6 +93,29 @@ fn a_promoted_club_starts_at_the_conventional_rating() {
         "nantes: {nantes}"
     );
     assert!((psg - 1_794.108_361_699_275_5).abs() < 1e-9, "psg: {psg}");
+}
+
+#[test]
+fn explicit_parameters_reproduce_the_production_update() {
+    let outcome = result(date(8, 15), "Lyon", "Lille", 2, 0);
+    let mut production = EloRatings::from_pairs([("Lyon", 1600.0), ("Lille", 1550.0)]);
+    let mut explicit = production.clone();
+
+    assert_eq!(production.apply_results([outcome.clone()]), 1);
+    assert!(explicit.apply_with(&outcome, HFA, BASE_K));
+
+    assert_eq!(production, explicit);
+}
+
+#[test]
+fn invalid_explicit_parameters_leave_the_ratings_unchanged() {
+    let outcome = result(date(8, 15), "Lyon", "Lille", 2, 0);
+    let ratings = EloRatings::from_pairs([("Lyon", 1600.0), ("Lille", 1550.0)]);
+    let mut explicit = ratings.clone();
+
+    assert!(!explicit.apply_with(&outcome, f64::NAN, BASE_K));
+    assert!(!explicit.apply_with(&outcome, HFA, -1.0));
+    assert_eq!(explicit, ratings);
 }
 
 #[test]

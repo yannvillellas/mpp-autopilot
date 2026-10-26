@@ -53,6 +53,37 @@ pipeline without submitting anything.
 | `mpp-autopilot list`  | Print the Ligue 1 fixtures and quotations.       |
 | `mpp-autopilot check` | Validate the configuration and exit.             |
 
+## Backtest
+
+The `backtest` feature builds a harness that replays the completed 2024/25 and
+2025/26 Ligue 1 seasons through the production model and Elo path:
+
+```bash
+cargo run --features backtest --bin backtest
+cargo run --features backtest --bin backtest -- --refresh
+cargo run --features backtest --bin backtest -- --check
+cargo run --features backtest --bin backtest -- --tune
+```
+
+The first run downloads the Football-Data seasons into the gitignored
+`backtest-data/` directory and writes `backtest-reference.json`. Commit that
+reference once; `--check` then fails when a metric moves by more than `1e-3` or
+a match count changes. Delete the file and run again to record a deliberate
+model change. A missing odds source is omitted from the table instead of failing
+the run. The binary is behind `required-features`, so release builds and the
+Docker image do not include it.
+
+Every row is paired with `market / pinnacle closing` on the matches both cover:
+the table shows the mean exact-loss difference and its 95% interval. The
+pre-closing row uses the closing totals as well, so it isolates the 1X2
+observation time. The report prints the 0.01 nat noise floor; an interval that
+contains zero is not a result.
+
+`--tune` is a separate mode. It fits the three rating-to-goals coefficients by
+maximum likelihood on 2020/21 to 2023/24, then sweeps `K` and the home advantage
+and ranks the candidates on 2024/25 and 2025/26. The evaluation seasons are
+never used for fitting; a split where the windows overlap is refused.
+
 ## Documentation
 
 - [MPP API reference](docs/mpp-api.md)
@@ -64,6 +95,14 @@ pipeline without submitting anything.
 cargo fmt
 cargo clippy --all-targets -- -D warnings
 cargo test
+```
+
+The backtest code is gated by the feature, so lint and test it explicitly:
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets --features backtest -- -D warnings
+cargo test --features backtest
 ```
 
 ## Disclaimer
