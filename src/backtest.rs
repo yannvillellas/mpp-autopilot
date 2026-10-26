@@ -42,6 +42,8 @@ use crate::elo::{
 use crate::model::{self, Odds, Outcome, Prediction, Score};
 use crate::odds;
 
+pub mod tune;
+
 /// Directory where downloaded Football-Data seasons are cached.
 pub const DATA_DIR: &str = "backtest-data";
 

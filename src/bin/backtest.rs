@@ -13,6 +13,7 @@ Measures the Ligue 1 model on completed Football-Data seasons.
 Options:
   --refresh   Download every season again instead of using backtest-data/
   --check     Compare the metrics with backtest-reference.json
+  --tune      Fit the Elo coefficients and sweep K and the home advantage
   -h, --help  Print this help
 
 Exit codes:
@@ -25,6 +26,7 @@ Exit codes:
 struct Args {
     refresh: bool,
     check: bool,
+    tune: bool,
     help: bool,
 }
 
@@ -47,6 +49,20 @@ async fn main() -> ExitCode {
         data_dir: PathBuf::from(backtest::DATA_DIR),
         refresh: args.refresh,
     };
+
+    if args.tune {
+        return match backtest::tune::tune(&options).await {
+            Ok(report) => {
+                report.print();
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("error: {error}");
+                ExitCode::from(1)
+            }
+        };
+    }
+
     let report = match backtest::run(&options).await {
         Ok(report) => report,
         Err(error) => {
@@ -115,6 +131,7 @@ where
     let mut parsed = Args {
         refresh: false,
         check: false,
+        tune: false,
         help: false,
     };
 
@@ -122,9 +139,14 @@ where
         match arg.as_str() {
             "--refresh" => parsed.refresh = true,
             "--check" => parsed.check = true,
+            "--tune" => parsed.tune = true,
             "-h" | "--help" => parsed.help = true,
             _ => return Err(format!("unknown argument: {arg}")),
         }
+    }
+
+    if parsed.check && parsed.tune {
+        return Err("--check and --tune are mutually exclusive".to_owned());
     }
 
     Ok(parsed)
@@ -145,6 +167,7 @@ mod tests {
             Args {
                 refresh: false,
                 check: false,
+                tune: false,
                 help: false
             }
         );
@@ -153,6 +176,16 @@ mod tests {
             Args {
                 refresh: true,
                 check: true,
+                tune: false,
+                help: false
+            }
+        );
+        assert_eq!(
+            args(&["--refresh", "--tune"]).expect("refresh and tune"),
+            Args {
+                refresh: true,
+                check: false,
+                tune: true,
                 help: false
             }
         );
@@ -161,6 +194,7 @@ mod tests {
             Args {
                 refresh: true,
                 check: false,
+                tune: false,
                 help: true
             }
         );
@@ -169,5 +203,10 @@ mod tests {
     #[test]
     fn rejects_unknown_arguments() {
         assert!(args(&["--now"]).is_err());
+    }
+
+    #[test]
+    fn check_and_tune_are_mutually_exclusive() {
+        assert!(args(&["--check", "--tune"]).is_err());
     }
 }

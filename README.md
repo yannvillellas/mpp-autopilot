@@ -62,6 +62,7 @@ The `backtest` feature builds a harness that replays the completed 2024/25 and
 cargo run --features backtest --bin backtest
 cargo run --features backtest --bin backtest -- --refresh
 cargo run --features backtest --bin backtest -- --check
+cargo run --features backtest --bin backtest -- --tune
 ```
 
 The first run downloads the Football-Data seasons into the gitignored
@@ -77,6 +78,11 @@ the table shows the mean exact-loss difference and its 95% interval. The
 pre-closing row uses the closing totals as well, so it isolates the 1X2
 observation time. The report prints the 0.01 nat noise floor; an interval that
 contains zero is not a result.
+
+`--tune` is a separate mode. It fits the three rating-to-goals coefficients by
+maximum likelihood on 2020/21 to 2023/24, then sweeps `K` and the home advantage
+and ranks the candidates on 2024/25 and 2025/26. The evaluation seasons are
+never used for fitting; a split where the windows overlap is refused.
 
 ## Documentation
 
