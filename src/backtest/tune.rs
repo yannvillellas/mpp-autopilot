@@ -141,12 +141,13 @@ impl Conversion {
     /// The production conversion.
     ///
     /// These are the coefficients fitted on 2020/21 to 2023/24 and adopted by
-    /// [`crate::model::lambdas`].
+    /// [`crate::model::lambdas`]. They are read from the model so there is a
+    /// single source of truth.
     pub fn production() -> Self {
         Self {
-            base_total: 2.7652,
-            total_slope: 0.000056,
-            share_scale: 0.003833,
+            base_total: model::BASE_TOTAL,
+            total_slope: model::TOTAL_SLOPE,
+            share_scale: model::SHARE_SCALE,
         }
     }
 

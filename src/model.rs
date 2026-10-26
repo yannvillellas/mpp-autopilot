@@ -27,7 +27,7 @@ pub const SCORES: usize = MAX_GOALS + 1;
 /// evaluated on 2024/25 and 2025/26, which the fit never saw. Regenerate with
 /// `cargo run --features backtest --bin backtest -- --tune`. The value is
 /// rounded to what the harness prints; the rounding has no measurable effect.
-const BASE_TOTAL: f64 = 2.7652;
+pub(crate) const BASE_TOTAL: f64 = 2.7652;
 
 /// Extra total goals per Elo point of rating difference.
 ///
@@ -37,7 +37,7 @@ const BASE_TOTAL: f64 = 2.7652;
 /// and 2025/26; regenerate with
 /// `cargo run --features backtest --bin backtest -- --tune`. Rounded to what
 /// the harness prints; the rounding has no measurable effect.
-const TOTAL_SLOPE: f64 = 0.000056;
+pub(crate) const TOTAL_SLOPE: f64 = 0.000056;
 
 /// Logistic scale that turns the rating difference into the home goal share.
 ///
@@ -47,7 +47,7 @@ const TOTAL_SLOPE: f64 = 0.000056;
 /// evaluated on 2024/25 and 2025/26; regenerate with
 /// `cargo run --features backtest --bin backtest -- --tune`. Rounded to what
 /// the harness prints; the rounding has no measurable effect.
-const SHARE_SCALE: f64 = 0.003833;
+pub(crate) const SHARE_SCALE: f64 = 0.003833;
 
 /// Match outcome from the home team's perspective.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
