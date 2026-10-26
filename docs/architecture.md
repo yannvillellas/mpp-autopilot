@@ -146,6 +146,11 @@ Every parameter is a named constant in `src/elo.rs` with its origin:
 A club with no history starts at `START`; a relegated club keeps its rating so
 it is still there if it comes back.
 
+The rating-to-goals conversion is fitted by the backtest on 2020/21 to 2023/24
+and evaluated on 2024/25 and 2025/26. Its `BASE_TOTAL`, `TOTAL_SLOPE` and
+`SHARE_SCALE` constants live in `src/model.rs`; regenerate them with
+`cargo run --features backtest --bin backtest -- --tune`.
+
 ### Backfill and incremental updates
 
 The first successful fetch backfills the archive from 2020/21 (about 2100

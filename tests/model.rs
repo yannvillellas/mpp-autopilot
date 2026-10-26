@@ -24,33 +24,48 @@ fn reference_case_matches_expected_values() {
     let prediction = predict(1684.0983240112262, 1670.9520303480226, odds)
         .expect("the reference inputs are valid");
 
-    assert_close(prediction.lambdas.home, 1.3007, TOLERANCE);
-    assert_close(prediction.lambdas.away, 1.2059, TOLERANCE);
+    assert_close(prediction.lambdas.home, 1.4178, TOLERANCE);
+    assert_close(prediction.lambdas.away, 1.3481, TOLERANCE);
 
-    assert_eq!(prediction.pick, Score { home: 1, away: 1 });
-    assert_close(prediction.pick_ev, 39.4, 0.05);
-    assert_close(prediction.pick_probability, 0.143, TOLERANCE);
+    assert_eq!(prediction.pick, Score { home: 1, away: 2 });
+    assert_close(prediction.pick_ev, 40.78, 0.05);
+    assert_close(prediction.pick_probability, 0.0812, TOLERANCE);
 
     assert_eq!(prediction.recommendation, Outcome::Away);
 }
 
 #[test]
+fn fitted_conversion_matches_the_tuned_values_and_is_symmetric() {
+    let cases = [
+        (1500.0, 1500.0, 1.382600, 1.382600),
+        (1700.0, 1500.0, 1.895684, 0.880716),
+        (1500.0, 1700.0, 0.880716, 1.895684),
+    ];
+
+    for (home_elo, away_elo, home, away) in cases {
+        let lambdas = lambdas(home_elo, away_elo).expect("valid Elo ratings");
+
+        assert_close(lambdas.home, home, 1e-6);
+        assert_close(lambdas.away, away, 1e-6);
+    }
+}
+
+#[test]
 fn outcome_probabilities_are_normalized() {
-    let prediction = predict(
-        1684.0983240112262,
-        1670.9520303480226,
-        Odds {
-            home: 81.0,
-            draw: 117.0,
-            away: 112.0,
-        },
-    )
-    .expect("the reference inputs are valid");
+    let odds = Odds {
+        home: 81.0,
+        draw: 117.0,
+        away: 112.0,
+    };
+    let prediction = predict(1684.0983240112262, 1670.9520303480226, odds)
+        .expect("the reference inputs are valid");
 
     let total = prediction.outcomes.home + prediction.outcomes.draw + prediction.outcomes.away;
     assert_close(total, 1.0, 1e-12);
 
-    let expected_ev = prediction.outcomes.draw * 117.0 + prediction.pick_probability * 30.0;
+    let outcome = Outcome::from_score(prediction.pick);
+    let expected_ev = prediction.outcomes.for_outcome(outcome) * odds.for_outcome(outcome)
+        + prediction.pick_probability * 30.0;
     assert_close(prediction.pick_ev, expected_ev, 1e-9);
 }
 
@@ -58,6 +73,8 @@ fn outcome_probabilities_are_normalized() {
 fn stronger_home_team_gets_higher_lambda() {
     let lambdas = lambdas(1800.0, 1500.0).expect("valid Elo ratings");
 
+    assert_close(lambdas.home, 2.112909, 1e-6);
+    assert_close(lambdas.away, 0.669091, 1e-6);
     assert!(lambdas.home > lambdas.away);
     assert!(lambdas.home > 0.0);
     assert!(lambdas.away > 0.0);
