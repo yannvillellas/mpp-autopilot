@@ -375,6 +375,19 @@ fn within_noise(exact: f64, best: f64) -> bool {
     exact - best < NOISE_FLOOR
 }
 
+fn check_alignment(expected: usize, actual: usize, k: f64, hfa: f64) -> Result<(), TuneError> {
+    if expected == actual {
+        Ok(())
+    } else {
+        Err(TuneError::Alignment {
+            k,
+            hfa,
+            expected,
+            actual,
+        })
+    }
+}
+
 /// Errors returned while tuning.
 #[derive(Debug, Error)]
 pub enum TuneError {
@@ -426,6 +439,20 @@ pub enum TuneError {
         /// Home advantage.
         hfa: f64,
     },
+    /// The evaluation matches and the replay vectors have different lengths.
+    #[error(
+        "evaluation/replay alignment changed for K={k} HFA={hfa}: {expected} evaluation matches, {actual} replay entries"
+    )]
+    Alignment {
+        /// Rating-update rate.
+        k: f64,
+        /// Home advantage.
+        hfa: f64,
+        /// Number of evaluation matches.
+        expected: usize,
+        /// Number of replay entries.
+        actual: usize,
+    },
     /// The fitted coefficients are not usable.
     #[error("the fitted conversion is not valid")]
     InvalidConversion,
@@ -466,6 +493,7 @@ async fn run_tune(options: &Options, split: Split) -> Result<TuneReport, TuneErr
     for k in K_VALUES {
         for hfa in HFA_VALUES {
             let replay = replay(&matches, split, hfa, k);
+            check_alignment(eval_matches.len(), replay.eval.len(), k, hfa)?;
             if replay.fit.is_empty() {
                 return Err(TuneError::NoFitMatches);
             }
@@ -824,6 +852,20 @@ mod tests {
             assert!((conversion.home - model.home).abs() < 1e-12);
             assert!((conversion.away - model.away).abs() < 1e-12);
         }
+    }
+
+    #[test]
+    fn mismatched_evaluation_and_replay_lengths_are_an_error() {
+        let error = check_alignment(3, 2, 20.0, 65.0).expect_err("mismatch");
+        assert!(matches!(
+            error,
+            TuneError::Alignment {
+                expected: 3,
+                actual: 2,
+                ..
+            }
+        ));
+        assert!(check_alignment(3, 3, 20.0, 65.0).is_ok());
     }
 
     #[test]
