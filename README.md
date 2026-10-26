@@ -72,6 +72,12 @@ model change. A missing odds source is omitted from the table instead of failing
 the run. The binary is behind `required-features`, so release builds and the
 Docker image do not include it.
 
+Every row is paired with `market / pinnacle closing` on the matches both cover:
+the table shows the mean exact-loss difference and its 95% interval. The
+pre-closing row uses the closing totals as well, so it isolates the 1X2
+observation time. The report prints the 0.01 nat noise floor; an interval that
+contains zero is not a result.
+
 ## Documentation
 
 - [MPP API reference](docs/mpp-api.md)

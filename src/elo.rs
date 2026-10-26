@@ -173,7 +173,10 @@ pub struct SeasonOdds {
     pub average_closing: Option<MatchOdds>,
     /// Best closing 1X2 and 2.5-goal prices.
     pub max_closing: Option<MatchOdds>,
-    /// Pinnacle pre-closing 1X2 and 2.5-goal prices.
+    /// Pinnacle pre-closing 1X2 prices with the closing 2.5-goal prices.
+    ///
+    /// Both Pinnacle sets share the closing totals so a pre-closing comparison
+    /// isolates the observation time of the 1X2 prices.
     pub pinnacle_pre_closing: Option<MatchOdds>,
 }
 
@@ -289,7 +292,18 @@ impl EloRatings {
             .count()
     }
 
-    fn apply_result(&mut self, result: &MatchResult) -> bool {
+    /// Applies one result with an explicit home advantage and K factor.
+    ///
+    /// The rule is the same as [`Self::apply_results`], which uses [`HFA`] and
+    /// [`BASE_K`]. The backtest uses this entry point to replay the history
+    /// with alternative values without copying the update rule. A non-finite
+    /// home advantage or a negative or non-finite K leaves the ratings
+    /// unchanged.
+    pub fn apply_with(&mut self, result: &MatchResult, hfa: f64, k: f64) -> bool {
+        if !hfa.is_finite() || !k.is_finite() || k < 0.0 {
+            return false;
+        }
+
         let home = club_key(&result.home);
         let away = club_key(&result.away);
         let key = match_key(result.season, result.date, &home, &away);
@@ -300,14 +314,18 @@ impl EloRatings {
 
         let home_rating = self.ratings.get(&home).copied().unwrap_or(START);
         let away_rating = self.ratings.get(&away).copied().unwrap_or(START);
-        let expected = expected_home_score(home_rating, away_rating);
+        let expected = expected_home_score_with(home_rating, away_rating, hfa);
         let margin = margin(result.home_goals.abs_diff(result.away_goals));
         let score = result_score(result.home_goals, result.away_goals);
-        let delta = BASE_K * margin * (score - expected);
+        let delta = k * margin * (score - expected);
 
         self.ratings.insert(home, home_rating + delta);
         self.ratings.insert(away, away_rating - delta);
         true
+    }
+
+    fn apply_result(&mut self, result: &MatchResult) -> bool {
+        self.apply_with(result, HFA, BASE_K)
     }
 }
 
@@ -505,8 +523,8 @@ impl EloError {
     }
 }
 
-fn expected_home_score(home: f64, away: f64) -> f64 {
-    let difference = home + HFA - away;
+fn expected_home_score_with(home: f64, away: f64, hfa: f64) -> f64 {
+    let difference = home + hfa - away;
     NEUTRAL_ODDS / (NEUTRAL_ODDS + ODDS_BASE.powf(-difference / SCALE))
 }
 
@@ -648,7 +666,7 @@ impl Columns {
             pinnacle_closing: odds("PSCH", "PSCD", "PSCA", "PC>2.5", "PC<2.5"),
             average_closing: odds("AvgCH", "AvgCD", "AvgCA", "AvgC>2.5", "AvgC<2.5"),
             max_closing: odds("MaxCH", "MaxCD", "MaxCA", "MaxC>2.5", "MaxC<2.5"),
-            pinnacle_pre_closing: odds("PSH", "PSD", "PSA", "P>2.5", "P<2.5"),
+            pinnacle_pre_closing: odds("PSH", "PSD", "PSA", "PC>2.5", "PC<2.5"),
         })
     }
 
@@ -906,7 +924,7 @@ mod tests {
 
     #[test]
     fn expected_score_includes_home_advantage() {
-        let expected = expected_home_score(START, START);
+        let expected = expected_home_score_with(START, START, HFA);
         let without_advantage = 1.0 / (1.0 + 10f64.powf(-HFA / SCALE));
 
         assert!((expected - without_advantage).abs() < 1e-12);
@@ -941,11 +959,11 @@ mod tests {
     #[test]
     fn parser_reads_the_backtest_odds_sets_and_leaves_empty_prices_out() {
         let csv = "Div,Date,HomeTeam,AwayTeam,FTHG,FTAG,PSCH,PSCD,PSCA,PC>2.5,PC<2.5,\
-                   AvgCH,AvgCD,AvgCA,AvgC>2.5,AvgC<2.5\r\n\
+                   PSH,PSD,PSA,P>2.5,P<2.5,AvgCH,AvgCD,AvgCA,AvgC>2.5,AvgC<2.5\r\n\
                    F1,16/08/2024,Le Havre,Paris SG,1,4,7.8,5.0,1.35,1.71,2.10,\
-                   7.3,4.9,1.37,1.69,2.13\r\n\
+                   7.5,5.1,1.40,1.30,3.00,7.3,4.9,1.37,1.69,2.13\r\n\
                    F1,17/08/2024,Brest,Marseille,1,5,3.3,3.6,2.1,,,\
-                   3.16,3.5,2.15,2.0,1.80\r\n";
+                   3.2,3.55,2.2,1.95,1.85,3.16,3.5,2.15,2.0,1.80\r\n";
 
         let matches = parse_season_matches(2024, csv).expect("parse CSV");
 
@@ -953,7 +971,14 @@ mod tests {
         let pinnacle = matches[0].odds.pinnacle_closing.expect("Pinnacle odds");
         assert!((pinnacle.home - 7.8).abs() < f64::EPSILON);
         assert!((pinnacle.over - 1.71).abs() < f64::EPSILON);
+        let pre = matches[0]
+            .odds
+            .pinnacle_pre_closing
+            .expect("Pinnacle pre-closing odds");
+        assert!((pre.home - 7.5).abs() < f64::EPSILON);
+        assert!((pre.over - 1.71).abs() < f64::EPSILON);
         assert!(matches[1].odds.pinnacle_closing.is_none());
+        assert!(matches[1].odds.pinnacle_pre_closing.is_none());
         assert!(matches[1].odds.average_closing.is_some());
         assert!(matches[0].odds.max_closing.is_none());
     }

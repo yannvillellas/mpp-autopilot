@@ -57,7 +57,14 @@ pub const EVALUATION_TO_SEASON: u16 = 2025;
 /// Absolute tolerance applied to every metric by [`check`].
 pub const TOLERANCE: f64 = 1e-3;
 
-const REFERENCE_VERSION: u32 = 1;
+/// Working noise floor for a log-loss difference, in nats.
+///
+/// Issue #16 sets it at roughly 0.01 nat; the paired intervals are the
+/// authoritative test for a given comparison.
+pub const NOISE_FLOOR: f64 = 0.01;
+
+const REFERENCE_VERSION: u32 = 2;
+const CONFIDENCE_Z: f64 = 1.96;
 
 /// Run options selected on the command line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,6 +142,25 @@ impl Configuration {
     }
 }
 
+/// Paired comparison of one configuration with the reference configuration.
+///
+/// For every match covered by both rows, `delta` is the reference exact-score
+/// loss minus the row's exact-score loss. A negative delta means the row is
+/// worse than the reference. The interval is `mean(delta) +/- 1.96 * se`,
+/// with `se` the sample standard deviation of the paired differences divided
+/// by the square root of their count.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PairedComparison {
+    /// Mean paired difference (reference minus row).
+    pub delta: f64,
+    /// Lower bound of the 95% interval, when at least two pairs exist.
+    pub ci_low: Option<f64>,
+    /// Upper bound of the 95% interval, when at least two pairs exist.
+    pub ci_high: Option<f64>,
+    /// Number of paired matches.
+    pub n: usize,
+}
+
 /// Mean metrics for one configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Metrics {
@@ -146,6 +172,8 @@ pub struct Metrics {
     pub hit: f64,
     /// Number of matches included.
     pub n: usize,
+    /// Paired comparison with the reference configuration.
+    pub paired: Option<PairedComparison>,
 }
 
 /// One configuration and its metrics.
@@ -204,19 +232,29 @@ impl Report {
     /// Prints the table, then the file fingerprints and date ranges.
     pub fn print(&self) {
         println!(
-            "{:<30} {:>8} {:>8} {:>8} {:>6}",
-            "configuration", "exact", "1x2", "hit", "n"
+            "{:<30} {:>8} {:>8} {:>8} {:>6} {:>9} {:>22} {:>7}",
+            "configuration", "exact", "1x2", "hit", "n", "delta ref", "95% CI", "paired"
         );
         for row in &self.configurations {
+            let (delta, interval, paired) = format_comparison(row.metrics.paired);
             println!(
-                "{:<30} {:>8.4} {:>8.4} {:>8.4} {:>6}",
+                "{:<30} {:>8.4} {:>8.4} {:>8.4} {:>6} {:>9} {:>22} {:>7}",
                 row.configuration.label(),
                 row.metrics.exact,
                 row.metrics.one_x_two,
                 row.metrics.hit,
-                row.metrics.n
+                row.metrics.n,
+                delta,
+                interval,
+                paired
             );
         }
+        println!(
+            "delta ref = market / pinnacle closing loss - row loss; negative means the row is worse"
+        );
+        println!(
+            "noise floor: {NOISE_FLOOR:.2} nat; a difference below it, or a 95% CI containing 0, is not a result"
+        );
 
         println!();
         println!("data files:");
@@ -348,6 +386,32 @@ pub enum CheckError {
         /// Configuration key.
         key: String,
     },
+    /// The paired match count differs from the reference.
+    #[error("configuration {key}: expected paired n={expected}, got paired n={actual}")]
+    PairedCount {
+        /// Configuration key.
+        key: String,
+        /// Paired count in the reference.
+        expected: usize,
+        /// Paired count in the report.
+        actual: usize,
+    },
+    /// A paired metric moved beyond the tolerance.
+    #[error(
+        "configuration {key} {metric}: expected {expected:.6}, got {actual:.6} (tolerance {tolerance})"
+    )]
+    PairedMetric {
+        /// Configuration key.
+        key: String,
+        /// Metric name.
+        metric: &'static str,
+        /// Reference value.
+        expected: f64,
+        /// Measured value.
+        actual: f64,
+        /// Allowed absolute difference.
+        tolerance: f64,
+    },
 }
 
 /// Reads the committed reference from `path`.
@@ -421,6 +485,41 @@ pub fn check(report: &Report, reference: &Reference) -> Result<CheckOutcome, Che
                     actual,
                     tolerance: TOLERANCE,
                 });
+            }
+        }
+
+        if let (Some(expected), Some(actual)) = (expected.paired, actual.metrics.paired) {
+            if expected.n != actual.n {
+                return Err(CheckError::PairedCount {
+                    key: key.clone(),
+                    expected: expected.n,
+                    actual: actual.n,
+                });
+            }
+            if !within_tolerance(expected.delta, actual.delta) {
+                return Err(CheckError::PairedMetric {
+                    key: key.clone(),
+                    metric: "delta",
+                    expected: expected.delta,
+                    actual: actual.delta,
+                    tolerance: TOLERANCE,
+                });
+            }
+            for (metric, expected, actual) in [
+                ("ci_low", expected.ci_low, actual.ci_low),
+                ("ci_high", expected.ci_high, actual.ci_high),
+            ] {
+                if let (Some(expected), Some(actual)) = (expected, actual) {
+                    if !within_tolerance(expected, actual) {
+                        return Err(CheckError::PairedMetric {
+                            key: key.clone(),
+                            metric,
+                            expected,
+                            actual,
+                            tolerance: TOLERANCE,
+                        });
+                    }
+                }
             }
         }
         checked += 1;
@@ -551,9 +650,9 @@ fn build_report(files: Vec<SeasonFile>) -> Report {
         files.iter().flat_map(|file| file.matches.iter()).collect();
     matches.sort_by(|left, right| compare_matches(&left.result, &right.result));
 
-    let mut accumulators: BTreeMap<Configuration, Accumulator> = Configuration::ALL
+    let mut losses: BTreeMap<Configuration, Vec<Option<MatchLoss>>> = Configuration::ALL
         .into_iter()
-        .map(|configuration| (configuration, Accumulator::default()))
+        .map(|configuration| (configuration, Vec::new()))
         .collect();
     let mut ratings = EloRatings::default();
     let mut evaluation: Option<DateRange> = None;
@@ -574,14 +673,15 @@ fn build_report(files: Vec<SeasonFile>) -> Report {
             });
 
             for configuration in Configuration::ALL {
-                let accumulator = accumulators
-                    .get_mut(&configuration)
-                    .expect("every configuration is registered");
-                if configuration == Configuration::Elo {
-                    evaluate_elo(&ratings, matched, accumulator);
+                let loss = if configuration == Configuration::Elo {
+                    evaluate_elo(&ratings, matched)
                 } else {
-                    evaluate_market(configuration, matched, accumulator);
-                }
+                    evaluate_market(configuration, matched)
+                };
+                losses
+                    .get_mut(&configuration)
+                    .expect("every configuration is registered")
+                    .push(loss);
             }
         }
 
@@ -590,13 +690,22 @@ fn build_report(files: Vec<SeasonFile>) -> Report {
         ratings.apply_results([matched.result.clone()]);
     }
 
+    let reference = losses
+        .get(&Configuration::PinnacleClosing)
+        .cloned()
+        .unwrap_or_default();
     let configurations = Configuration::ALL
         .into_iter()
         .filter_map(|configuration| {
-            let accumulator = accumulators
+            let configuration_losses = losses
                 .get(&configuration)
                 .expect("every configuration is registered");
-            accumulator.metrics().map(|metrics| ConfigurationReport {
+            metrics_from_losses(
+                configuration_losses,
+                &reference,
+                configuration == Configuration::PinnacleClosing,
+            )
+            .map(|metrics| ConfigurationReport {
                 configuration,
                 metrics,
             })
@@ -645,54 +754,50 @@ fn date_range(matches: &[SeasonMatch]) -> Option<DateRange> {
     ))
 }
 
-fn evaluate_market(
-    configuration: Configuration,
-    matched: &SeasonMatch,
-    accumulator: &mut Accumulator,
-) {
-    let Some(odds) = configuration.odds(&matched.odds) else {
-        return;
-    };
-    let Some((p_home, p_over)) = market_probabilities(&odds) else {
-        return;
-    };
-    let Ok(lambdas) = odds::expected_goals(p_home, p_over) else {
-        return;
-    };
-    let Ok(prediction) = model::predict_from_lambdas(lambdas, quotation(&odds)) else {
-        return;
-    };
-    let Ok(grid) = model::score_matrix(lambdas) else {
-        return;
-    };
+fn evaluate_market(configuration: Configuration, matched: &SeasonMatch) -> Option<MatchLoss> {
+    let odds = configuration.odds(&matched.odds)?;
+    let (p_home, p_over) = market_probabilities(&odds)?;
+    let lambdas = odds::expected_goals(p_home, p_over).ok()?;
+    let prediction = model::predict_from_lambdas(lambdas, quotation(&odds)).ok()?;
+    let grid = model::score_matrix(lambdas).ok()?;
 
-    accumulator.record(&prediction, &grid, actual_score(&matched.result));
+    loss_from_prediction(&prediction, &grid, actual_score(&matched.result))
 }
 
-fn evaluate_elo(ratings: &EloRatings, matched: &SeasonMatch, accumulator: &mut Accumulator) {
-    let (Some(home), Some(away)) = (
-        ratings.rating(&matched.result.home),
-        ratings.rating(&matched.result.away),
-    ) else {
-        // Production leaves a trigger pending when a club has no rating yet.
-        return;
-    };
+fn evaluate_elo(ratings: &EloRatings, matched: &SeasonMatch) -> Option<MatchLoss> {
+    let (home, away) = (
+        ratings.rating(&matched.result.home)?,
+        ratings.rating(&matched.result.away)?,
+    );
 
-    let Ok(lambdas) = model::lambdas(home, away) else {
-        return;
-    };
+    let lambdas = model::lambdas(home, away).ok()?;
     let quotation = matched
         .odds
         .average_closing
         .map_or_else(neutral_quotation, |odds| quotation(&odds));
-    let Ok(prediction) = model::predict_from_lambdas(lambdas, quotation) else {
-        return;
-    };
-    let Ok(grid) = model::score_matrix(lambdas) else {
-        return;
-    };
+    let prediction = model::predict_from_lambdas(lambdas, quotation).ok()?;
+    let grid = model::score_matrix(lambdas).ok()?;
 
-    accumulator.record(&prediction, &grid, actual_score(&matched.result));
+    loss_from_prediction(&prediction, &grid, actual_score(&matched.result))
+}
+
+fn loss_from_prediction(
+    prediction: &Prediction,
+    grid: &[[f64; model::SCORES]; model::SCORES],
+    actual: Score,
+) -> Option<MatchLoss> {
+    let capped = Score {
+        home: actual.home.min(model::MAX_GOALS as u8),
+        away: actual.away.min(model::MAX_GOALS as u8),
+    };
+    let exact = log_loss(grid[usize::from(capped.home)][usize::from(capped.away)])?;
+    let one_x_two = log_loss(prediction.outcomes.for_outcome(Outcome::from_score(actual)))?;
+
+    Some(MatchLoss {
+        exact,
+        one_x_two,
+        hit: prediction.pick == actual,
+    })
 }
 
 fn market_probabilities(odds: &MatchOdds) -> Option<(f64, f64)> {
@@ -741,53 +846,97 @@ fn actual_score(result: &MatchResult) -> Score {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-struct Accumulator {
-    exact_loss: f64,
-    one_x_two_loss: f64,
-    hits: usize,
-    n: usize,
+#[derive(Debug, Clone, Copy)]
+struct MatchLoss {
+    exact: f64,
+    one_x_two: f64,
+    hit: bool,
 }
 
-impl Accumulator {
-    fn record(
-        &mut self,
-        prediction: &Prediction,
-        grid: &[[f64; model::SCORES]; model::SCORES],
-        actual: Score,
-    ) -> bool {
-        let capped = Score {
-            home: actual.home.min(model::MAX_GOALS as u8),
-            away: actual.away.min(model::MAX_GOALS as u8),
-        };
-        let Some(exact) = log_loss(grid[usize::from(capped.home)][usize::from(capped.away)]) else {
-            return false;
-        };
-        let Some(one_x_two) =
-            log_loss(prediction.outcomes.for_outcome(Outcome::from_score(actual)))
-        else {
-            return false;
-        };
-
-        self.exact_loss += exact;
-        self.one_x_two_loss += one_x_two;
-        self.hits += usize::from(prediction.pick == actual);
-        self.n += 1;
-        true
+fn metrics_from_losses(
+    losses: &[Option<MatchLoss>],
+    reference: &[Option<MatchLoss>],
+    is_reference: bool,
+) -> Option<Metrics> {
+    let counted: Vec<MatchLoss> = losses.iter().flatten().copied().collect();
+    if counted.is_empty() {
+        return None;
     }
 
-    fn metrics(self) -> Option<Metrics> {
-        if self.n == 0 {
-            return None;
-        }
-        let n = self.n as f64;
-        Some(Metrics {
-            exact: self.exact_loss / n,
-            one_x_two: self.one_x_two_loss / n,
-            hit: self.hits as f64 / n,
-            n: self.n,
+    let n = counted.len();
+    let factor = n as f64;
+    let paired = if is_reference {
+        Some(PairedComparison {
+            delta: 0.0,
+            ci_low: Some(0.0),
+            ci_high: Some(0.0),
+            n,
         })
+    } else {
+        paired_comparison(losses, reference)
+    };
+
+    Some(Metrics {
+        exact: counted.iter().map(|loss| loss.exact).sum::<f64>() / factor,
+        one_x_two: counted.iter().map(|loss| loss.one_x_two).sum::<f64>() / factor,
+        hit: counted.iter().filter(|loss| loss.hit).count() as f64 / factor,
+        n,
+        paired,
+    })
+}
+
+fn paired_comparison(
+    losses: &[Option<MatchLoss>],
+    reference: &[Option<MatchLoss>],
+) -> Option<PairedComparison> {
+    let differences: Vec<f64> = losses
+        .iter()
+        .zip(reference)
+        .filter_map(|(loss, reference)| match (loss, reference) {
+            (Some(loss), Some(reference)) => Some(reference.exact - loss.exact),
+            _ => None,
+        })
+        .collect();
+
+    if differences.is_empty() {
+        return None;
     }
+
+    let n = differences.len();
+    let mean = differences.iter().sum::<f64>() / n as f64;
+    let (ci_low, ci_high) = if n < 2 {
+        (None, None)
+    } else {
+        let variance = differences
+            .iter()
+            .map(|difference| (difference - mean).powi(2))
+            .sum::<f64>()
+            / (n - 1) as f64;
+        let standard_error = variance.sqrt() / (n as f64).sqrt();
+        (
+            Some(mean - CONFIDENCE_Z * standard_error),
+            Some(mean + CONFIDENCE_Z * standard_error),
+        )
+    };
+
+    Some(PairedComparison {
+        delta: mean,
+        ci_low,
+        ci_high,
+        n,
+    })
+}
+
+fn format_comparison(comparison: Option<PairedComparison>) -> (String, String, String) {
+    let Some(comparison) = comparison else {
+        return ("—".to_owned(), "—".to_owned(), "—".to_owned());
+    };
+    let delta = format!("{:+.4}", comparison.delta);
+    let interval = match (comparison.ci_low, comparison.ci_high) {
+        (Some(low), Some(high)) => format!("[{low:+.4}, {high:+.4}]"),
+        _ => "—".to_owned(),
+    };
+    (delta, interval, comparison.n.to_string())
 }
 
 fn log_loss(probability: f64) -> Option<f64> {
@@ -849,7 +998,74 @@ mod tests {
             assert!(row.metrics.exact.is_finite() && row.metrics.exact > 0.0);
             assert!(row.metrics.one_x_two.is_finite() && row.metrics.one_x_two > 0.0);
             assert!((0.0..=1.0).contains(&row.metrics.hit));
+            let paired = row.metrics.paired.expect("paired against Pinnacle");
+            assert_eq!(paired.n, 3);
+            assert!(paired.ci_low.is_some() && paired.ci_high.is_some());
         }
+        let reference = report
+            .configurations
+            .iter()
+            .find(|row| row.configuration == Configuration::PinnacleClosing)
+            .expect("reference row");
+        assert_eq!(
+            reference.metrics.paired.expect("self comparison").delta,
+            0.0
+        );
+    }
+
+    #[test]
+    fn paired_interval_matches_a_hand_computed_vector() {
+        // Differences reference - row: 1, 2, 3, 4.
+        // mean = 2.5, sample variance = 5/3, se = sqrt(5/3)/2,
+        // 1.96 * se = 1.2651745...
+        let losses: Vec<Option<MatchLoss>> = [1.0, 2.0, 3.0, 4.0]
+            .into_iter()
+            .map(|exact| {
+                Some(MatchLoss {
+                    exact,
+                    one_x_two: 0.0,
+                    hit: false,
+                })
+            })
+            .collect();
+        let reference: Vec<Option<MatchLoss>> = [2.0, 4.0, 6.0, 8.0]
+            .into_iter()
+            .map(|exact| {
+                Some(MatchLoss {
+                    exact,
+                    one_x_two: 0.0,
+                    hit: false,
+                })
+            })
+            .collect();
+
+        let paired = paired_comparison(&losses, &reference).expect("paired comparison");
+
+        assert_eq!(paired.n, 4);
+        assert!((paired.delta - 2.5).abs() < 1e-12);
+        assert!((paired.ci_low.expect("lower bound") - 1.234_825_440_238_910_5).abs() < 1e-12);
+        assert!((paired.ci_high.expect("upper bound") - 3.765_174_559_761_089_5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_single_pair_has_no_interval() {
+        let losses = [Some(MatchLoss {
+            exact: 1.0,
+            one_x_two: 0.0,
+            hit: false,
+        })];
+        let reference = [Some(MatchLoss {
+            exact: 2.0,
+            one_x_two: 0.0,
+            hit: false,
+        })];
+
+        let paired = paired_comparison(&losses, &reference).expect("one pair");
+
+        assert_eq!(paired.n, 1);
+        assert_eq!(paired.delta, 1.0);
+        assert_eq!(paired.ci_low, None);
+        assert_eq!(paired.ci_high, None);
     }
 
     #[test]
@@ -864,6 +1080,7 @@ mod tests {
             Configuration::AverageClosing
         );
         assert_eq!(report.configurations[0].metrics.n, 1);
+        assert_eq!(report.configurations[0].metrics.paired, None);
     }
 
     const RESULTS_2023: &str =
@@ -882,8 +1099,8 @@ mod tests {
         let current = parse_season_matches(2024, RESULTS_2024)
             .expect("parse evaluated season")
             .remove(0);
-        let mut expected = Accumulator::default();
-        evaluate_elo(&ratings, &current, &mut expected);
+        let loss = evaluate_elo(&ratings, &current).expect("one evaluated match");
+        let expected = metrics_from_losses(&[Some(loss)], &[], false).expect("one evaluated match");
 
         let report = build_report(vec![
             fixture_file(2023, RESULTS_2023),
@@ -893,10 +1110,7 @@ mod tests {
         assert_eq!(report.evaluation_matches, 1);
         assert_eq!(report.configurations.len(), 1);
         assert_eq!(report.configurations[0].configuration, Configuration::Elo);
-        assert_eq!(
-            report.configurations[0].metrics,
-            expected.metrics().expect("one evaluated match")
-        );
+        assert_eq!(report.configurations[0].metrics, expected);
     }
 
     #[test]
@@ -922,6 +1136,28 @@ mod tests {
             check(&report, &beyond),
             Err(CheckError::Metric {
                 metric: "exact",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn check_rejects_a_paired_delta_beyond_tolerance() {
+        let report = fixture_report();
+        let mut reference = report.reference();
+        reference
+            .configurations
+            .get_mut("average_closing")
+            .expect("average closing entry")
+            .paired
+            .as_mut()
+            .expect("paired entry")
+            .delta += 0.01;
+
+        assert!(matches!(
+            check(&report, &reference),
+            Err(CheckError::PairedMetric {
+                metric: "delta",
                 ..
             })
         ));
@@ -998,6 +1234,26 @@ mod tests {
             assert!(within_tolerance(loaded.exact, expected.exact));
             assert!(within_tolerance(loaded.one_x_two, expected.one_x_two));
             assert!(within_tolerance(loaded.hit, expected.hit));
+            match (loaded.paired, expected.paired) {
+                (Some(loaded), Some(expected)) => {
+                    assert_eq!(loaded.n, expected.n);
+                    assert!(within_tolerance(loaded.delta, expected.delta));
+                    for (loaded, expected) in [
+                        (loaded.ci_low, expected.ci_low),
+                        (loaded.ci_high, expected.ci_high),
+                    ] {
+                        match (loaded, expected) {
+                            (Some(loaded), Some(expected)) => {
+                                assert!(within_tolerance(loaded, expected));
+                            }
+                            (None, None) => {}
+                            _ => panic!("CI presence differs for {key}"),
+                        }
+                    }
+                }
+                (None, None) => {}
+                _ => panic!("paired presence differs for {key}"),
+            }
         }
     }
 
