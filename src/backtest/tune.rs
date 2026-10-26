@@ -932,18 +932,6 @@ mod tests {
         }
 
         let (fitted, diagnostics) = fit_conversion(&matches).expect("fit");
-        println!(
-            "truth nll {}",
-            negative_log_likelihood(truth.logs(), &matches)
-        );
-        println!(
-            "fit nll {}",
-            negative_log_likelihood(fitted.logs(), &matches)
-        );
-        println!(
-            "fit grad {:?}",
-            negative_log_likelihood_and_gradient(fitted.logs(), &matches).1
-        );
 
         assert_eq!(diagnostics.status, FitStatus::Converged);
         assert!(diagnostics.gradient_norm < GRADIENT_TOLERANCE);
