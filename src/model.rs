@@ -21,6 +21,34 @@ pub const FLAT_BONUS: f64 = 30.0;
 /// Number of goal counts per team in the score grid.
 pub const SCORES: usize = MAX_GOALS + 1;
 
+/// Goals expected when the two ratings are equal.
+///
+/// Fitted by maximum likelihood on the 2020/21 to 2023/24 Ligue 1 seasons and
+/// evaluated on 2024/25 and 2025/26, which the fit never saw. Regenerate with
+/// `cargo run --features backtest --bin backtest -- --tune`. The value is
+/// rounded to what the harness prints; the rounding has no measurable effect.
+pub(crate) const BASE_TOTAL: f64 = 2.7652;
+
+/// Extra total goals per Elo point of rating difference.
+///
+/// The fit learned that the total barely depends on the gap: the slope
+/// collapses to about 0.00006 instead of the previous 1/2000, so the total is
+/// almost flat at 2.77. Fitted on 2020/21 to 2023/24 and evaluated on 2024/25
+/// and 2025/26; regenerate with
+/// `cargo run --features backtest --bin backtest -- --tune`. Rounded to what
+/// the harness prints; the rounding has no measurable effect.
+pub(crate) const TOTAL_SLOPE: f64 = 0.000056;
+
+/// Logistic scale that turns the rating difference into the home goal share.
+///
+/// The fitted share reacts less sharply to the rating gap than the win
+/// probability (0.003833 against 0.00576): a side can win 90% of its matches,
+/// but it cannot score 90% of the goals. Fitted on 2020/21 to 2023/24 and
+/// evaluated on 2024/25 and 2025/26; regenerate with
+/// `cargo run --features backtest --bin backtest -- --tune`. Rounded to what
+/// the harness prints; the rounding has no measurable effect.
+pub(crate) const SHARE_SCALE: f64 = 0.003833;
+
 /// Match outcome from the home team's perspective.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
@@ -163,19 +191,20 @@ pub enum ModelError {
 
 /// Converts Elo ratings into expected goals.
 ///
-/// Both ratings must be finite. The total number of goals grows with the
-/// Elo gap, while the split between the teams follows the logistic model.
+/// Both ratings must be finite. The total is almost flat around the fitted
+/// base total, while the split between the teams follows the fitted logistic
+/// share.
 pub fn lambdas(elo_home: f64, elo_away: f64) -> Result<Lambdas, ModelError> {
     if !elo_home.is_finite() || !elo_away.is_finite() {
         return Err(ModelError::InvalidElo);
     }
 
-    let diff = (elo_home - elo_away).abs();
-    let total = 2.5 + diff / 2000.0;
-    let exp_home = 1.0 / (1.0 + 10f64.powf((elo_away - elo_home) / 400.0));
+    let difference = elo_home - elo_away;
+    let total = BASE_TOTAL + TOTAL_SLOPE * difference.abs();
+    let share = 1.0 / (1.0 + (-SHARE_SCALE * difference).exp());
     let lambdas = Lambdas {
-        home: total * exp_home,
-        away: total * (1.0 - exp_home),
+        home: total * share,
+        away: total * (1.0 - share),
     };
 
     let valid = lambdas.home.is_finite()

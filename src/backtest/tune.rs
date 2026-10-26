@@ -138,10 +138,25 @@ pub struct Conversion {
 }
 
 impl Conversion {
-    /// Starting point of the fit, equal to the production conversion.
+    /// The production conversion.
     ///
-    /// It is an initial value for the optimiser, not a fitted result.
+    /// These are the coefficients fitted on 2020/21 to 2023/24 and adopted by
+    /// [`crate::model::lambdas`]. They are read from the model so there is a
+    /// single source of truth.
     pub fn production() -> Self {
+        Self {
+            base_total: model::BASE_TOTAL,
+            total_slope: model::TOTAL_SLOPE,
+            share_scale: model::SHARE_SCALE,
+        }
+    }
+
+    /// Neutral seed for the optimiser.
+    ///
+    /// This is the previous production conversion. It is only a starting
+    /// point for the fit, never a result: keeping it away from the fitted
+    /// optimum makes the iteration path reproducible across runs.
+    fn starting_point() -> Self {
         Self {
             base_total: 2.5,
             total_slope: 1.0 / 2000.0,
@@ -622,7 +637,7 @@ fn fit_conversion(matches: &[RatingMatch]) -> Result<(Conversion, FitDiagnostics
         return Err(TuneError::NoFitMatches);
     }
 
-    let mut logs = Conversion::production().logs();
+    let mut logs = Conversion::starting_point().logs();
     let mut current = negative_log_likelihood(logs, matches);
     let mut iterations = 0;
     let mut gradient_norm = f64::NAN;
