@@ -196,14 +196,37 @@ impl Conversion {
     }
 }
 
+const PRODUCTION_K: f64 = 20.0;
+const PRODUCTION_HFA: f64 = 65.0;
+
+/// Where a candidate's conversion comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CandidateSource {
+    /// The production conversion, evaluated without fitting.
+    Production,
+    /// A conversion fitted on the fit window.
+    Fitted,
+}
+
+impl CandidateSource {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Production => "production",
+            Self::Fitted => "fitted",
+        }
+    }
+}
+
 /// One evaluated parameter candidate.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TuneCandidate {
+    /// Whether the conversion is the production one or fitted.
+    pub source: CandidateSource,
     /// Rating-update rate.
     pub k: f64,
     /// Home advantage, in Elo points.
     pub hfa: f64,
-    /// Conversion fitted on the fit window.
+    /// Conversion used for the evaluation.
     pub conversion: Conversion,
     /// Metrics on the evaluation window, paired against the market.
     pub metrics: Metrics,
@@ -233,8 +256,9 @@ impl TuneReport {
         );
         println!();
         println!(
-            "{:>4} {:>3} {:>4} {:>11} {:>12} {:>12} {:>8} {:>4} {:>9} {:>22} {:>7}",
+            "{:>4} {:>10} {:>3} {:>4} {:>11} {:>12} {:>12} {:>8} {:>4} {:>9} {:>22} {:>7}",
             "rank",
+            "source",
             "K",
             "HFA",
             "base_total",
@@ -249,8 +273,9 @@ impl TuneReport {
         for (rank, candidate) in self.candidates.iter().enumerate() {
             let (delta, interval, paired) = format_comparison(candidate.metrics.paired);
             println!(
-                "{:>4} {:>3.0} {:>4.0} {:>11.4} {:>12.6} {:>12.6} {:>8.4} {:>4} {:>9} {:>22} {:>7}",
+                "{:>4} {:>10} {:>3.0} {:>4.0} {:>11.4} {:>12.6} {:>12.6} {:>8.4} {:>4} {:>9} {:>22} {:>7}",
                 rank + 1,
+                candidate.source.label(),
                 candidate.k,
                 candidate.hfa,
                 candidate.conversion.base_total,
@@ -357,7 +382,7 @@ async fn run_tune(options: &Options, split: Split) -> Result<TuneReport, TuneErr
     let market = metrics_from_losses(&market_losses, &market_losses, true)
         .ok_or(TuneError::NoMarketBenchmark)?;
 
-    let mut candidates = Vec::with_capacity(K_VALUES.len() * HFA_VALUES.len());
+    let mut candidates = Vec::with_capacity(K_VALUES.len() * HFA_VALUES.len() + 1);
     let mut fit_matches = 0;
 
     for k in K_VALUES {
@@ -378,11 +403,34 @@ async fn run_tune(options: &Options, split: Split) -> Result<TuneReport, TuneErr
             let metrics = metrics_from_losses(&losses, &market_losses, false)
                 .ok_or(TuneError::NoEvaluationMatches { k, hfa })?;
             candidates.push(TuneCandidate {
+                source: CandidateSource::Fitted,
                 k,
                 hfa,
                 conversion,
                 metrics,
             });
+
+            if k == PRODUCTION_K && hfa == PRODUCTION_HFA {
+                let production = Conversion::production();
+                let production_losses: Vec<Option<MatchLoss>> = eval_matches
+                    .iter()
+                    .zip(&replay.eval)
+                    .map(|(matched, ratings)| {
+                        ratings
+                            .and_then(|ratings| evaluate_candidate(production, &ratings, matched))
+                    })
+                    .collect();
+                let production_metrics =
+                    metrics_from_losses(&production_losses, &market_losses, false)
+                        .ok_or(TuneError::NoEvaluationMatches { k, hfa })?;
+                candidates.push(TuneCandidate {
+                    source: CandidateSource::Production,
+                    k,
+                    hfa,
+                    conversion: production,
+                    metrics: production_metrics,
+                });
+            }
         }
     }
 
@@ -663,6 +711,19 @@ mod tests {
                 return goals;
             }
             goals += 1;
+        }
+    }
+
+    #[test]
+    fn production_conversion_reproduces_model_lambdas() {
+        for (home, away) in [(1_600.0, 1_600.0), (1_750.0, 1_500.0), (1_500.0, 1_750.0)] {
+            let conversion = Conversion::production()
+                .lambdas(home, away)
+                .expect("valid production conversion");
+            let model = model::lambdas(home, away).expect("valid model conversion");
+
+            assert!((conversion.home - model.home).abs() < 1e-12);
+            assert!((conversion.away - model.away).abs() < 1e-12);
         }
     }
 
