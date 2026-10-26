@@ -217,6 +217,45 @@ impl CandidateSource {
     }
 }
 
+/// Why a conversion fit stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FitStatus {
+    /// The gradient norm fell below the tolerance.
+    Converged,
+    /// The iteration cap was reached.
+    IterationLimit,
+    /// The line search could not lower the likelihood.
+    LineSearchFailed,
+    /// The likelihood or its gradient became non-finite.
+    InvalidLikelihood,
+}
+
+impl FitStatus {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Converged => "converged",
+            Self::IterationLimit => "iter-limit",
+            Self::LineSearchFailed => "line-search",
+            Self::InvalidLikelihood => "invalid-nll",
+        }
+    }
+
+    fn converged(self) -> bool {
+        self == Self::Converged
+    }
+}
+
+/// Convergence diagnostics for one fitted conversion.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FitDiagnostics {
+    /// Number of optimisation iterations.
+    pub iterations: usize,
+    /// Final gradient norm, in log-coefficient space.
+    pub gradient_norm: f64,
+    /// Why the fit stopped.
+    pub status: FitStatus,
+}
+
 /// One evaluated parameter candidate.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TuneCandidate {
@@ -228,6 +267,8 @@ pub struct TuneCandidate {
     pub hfa: f64,
     /// Conversion used for the evaluation.
     pub conversion: Conversion,
+    /// Fit diagnostics, absent for the production row.
+    pub fit: Option<FitDiagnostics>,
     /// Metrics on the evaluation window, paired against the market.
     pub metrics: Metrics,
 }
@@ -256,9 +297,11 @@ impl TuneReport {
         );
         println!();
         println!(
-            "{:>4} {:>10} {:>3} {:>4} {:>11} {:>12} {:>12} {:>8} {:>4} {:>9} {:>22} {:>7}",
+            "{:>4} {:>10} {:>4} {:>10} {:>3} {:>4} {:>11} {:>12} {:>12} {:>8} {:>4} {:>9} {:>22} {:>7}",
             "rank",
             "source",
+            "iter",
+            "state",
             "K",
             "HFA",
             "base_total",
@@ -272,10 +315,16 @@ impl TuneReport {
         );
         for (rank, candidate) in self.candidates.iter().enumerate() {
             let (delta, interval, paired) = format_comparison(candidate.metrics.paired);
+            let (iterations, state) = candidate.fit.map_or_else(
+                || ("—".to_owned(), "not fitted".to_owned()),
+                |fit| (fit.iterations.to_string(), fit.status.label().to_owned()),
+            );
             println!(
-                "{:>4} {:>10} {:>3.0} {:>4.0} {:>11.4} {:>12.6} {:>12.6} {:>8.4} {:>4} {:>9} {:>22} {:>7}",
+                "{:>4} {:>10} {:>4} {:>10} {:>3.0} {:>4.0} {:>11.4} {:>12.6} {:>12.6} {:>8.4} {:>4} {:>9} {:>22} {:>7}",
                 rank + 1,
                 candidate.source.label(),
+                iterations,
+                state,
                 candidate.k,
                 candidate.hfa,
                 candidate.conversion.base_total,
@@ -286,6 +335,16 @@ impl TuneReport {
                 delta,
                 interval,
                 paired
+            );
+        }
+        let not_converged = self
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.fit.is_some_and(|fit| !fit.status.converged()))
+            .count();
+        if not_converged > 0 {
+            println!(
+                "warning: {not_converged} fitted candidate(s) did not converge; their coefficients are the last iterate"
             );
         }
         println!(
@@ -392,7 +451,7 @@ async fn run_tune(options: &Options, split: Split) -> Result<TuneReport, TuneErr
                 return Err(TuneError::NoFitMatches);
             }
             fit_matches = replay.fit.len();
-            let conversion = fit_conversion(&replay.fit)?;
+            let (conversion, fit) = fit_conversion(&replay.fit)?;
             let losses: Vec<Option<MatchLoss>> = eval_matches
                 .iter()
                 .zip(&replay.eval)
@@ -407,6 +466,7 @@ async fn run_tune(options: &Options, split: Split) -> Result<TuneReport, TuneErr
                 k,
                 hfa,
                 conversion,
+                fit: Some(fit),
                 metrics,
             });
 
@@ -428,6 +488,7 @@ async fn run_tune(options: &Options, split: Split) -> Result<TuneReport, TuneErr
                     k,
                     hfa,
                     conversion: production,
+                    fit: None,
                     metrics: production_metrics,
                 });
             }
@@ -509,17 +570,22 @@ fn evaluate_candidate(
     loss_from_prediction(&prediction, &grid, actual_score(&matched.result))
 }
 
-fn fit_conversion(matches: &[RatingMatch]) -> Result<Conversion, TuneError> {
+fn fit_conversion(matches: &[RatingMatch]) -> Result<(Conversion, FitDiagnostics), TuneError> {
     if matches.is_empty() {
         return Err(TuneError::NoFitMatches);
     }
 
     let mut logs = Conversion::production().logs();
     let mut current = negative_log_likelihood(logs, matches);
+    let mut iterations = 0;
+    let mut gradient_norm = f64::NAN;
+    let mut status = FitStatus::IterationLimit;
 
     for _ in 0..MAX_FIT_ITERATIONS {
+        iterations += 1;
         let (value, gradient) = negative_log_likelihood_and_gradient(logs, matches);
         if !value.is_finite() {
+            status = FitStatus::InvalidLikelihood;
             break;
         }
         let norm = gradient
@@ -527,7 +593,13 @@ fn fit_conversion(matches: &[RatingMatch]) -> Result<Conversion, TuneError> {
             .map(|value| value * value)
             .sum::<f64>()
             .sqrt();
-        if !norm.is_finite() || norm < GRADIENT_TOLERANCE {
+        gradient_norm = norm;
+        if !norm.is_finite() {
+            status = FitStatus::InvalidLikelihood;
+            break;
+        }
+        if norm < GRADIENT_TOLERANCE {
+            status = FitStatus::Converged;
             break;
         }
 
@@ -554,16 +626,24 @@ fn fit_conversion(matches: &[RatingMatch]) -> Result<Conversion, TuneError> {
             step *= 0.5;
         }
         if !accepted {
+            status = FitStatus::LineSearchFailed;
             break;
         }
     }
 
     let conversion = Conversion::from_logs(logs);
-    if conversion.is_valid() {
-        Ok(conversion)
-    } else {
-        Err(TuneError::InvalidConversion)
+    if !conversion.is_valid() {
+        return Err(TuneError::InvalidConversion);
     }
+
+    Ok((
+        conversion,
+        FitDiagnostics {
+            iterations,
+            gradient_norm,
+            status,
+        },
+    ))
 }
 
 #[allow(
@@ -783,7 +863,7 @@ mod tests {
             });
         }
 
-        let fitted = fit_conversion(&matches).expect("fit");
+        let (fitted, diagnostics) = fit_conversion(&matches).expect("fit");
         println!(
             "truth nll {}",
             negative_log_likelihood(truth.logs(), &matches)
@@ -796,6 +876,10 @@ mod tests {
             "fit grad {:?}",
             negative_log_likelihood_and_gradient(fitted.logs(), &matches).1
         );
+
+        assert_eq!(diagnostics.status, FitStatus::Converged);
+        assert!(diagnostics.gradient_norm < GRADIENT_TOLERANCE);
+        assert!(diagnostics.iterations > 0);
 
         assert!(
             (fitted.base_total - truth.base_total).abs() < 0.05,
