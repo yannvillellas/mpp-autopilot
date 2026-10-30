@@ -217,8 +217,8 @@ For every finished match with a forecast, the bot stores one row in
 - the final score and MPP status;
 - the MPP points total and breakdown;
 - the points recomputed from the stored quotation and the 30-point exact bonus;
-- the source and the write-time quotation, when the local forecast is still
-  available;
+- the source and the daily-snapshot quotation used by the model, when the
+  local forecast is still available;
 - the modal score and the points it would have earned.
 
 The local `MatchState.forecast` is written on a successful PATCH, and also when

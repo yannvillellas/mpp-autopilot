@@ -69,7 +69,7 @@ pub enum ForecastOrigin {
 pub struct ForecastRecord {
     /// Exact score written to MPP.
     pub pick: Score,
-    /// MPP quotations used by the model at write time.
+    /// MPP quotations from the daily snapshot used by the model at write time.
     pub odds: Odds,
     /// Prediction source.
     pub source: ForecastOrigin,

@@ -955,11 +955,15 @@ fn season_match(
         (Some(result), Some(odds), Some(modal)) => Some(model::points(modal, result, odds)),
         _ => None,
     };
-    let points = historical
-        .forecast
-        .as_ref()
-        .and_then(|forecast| forecast.points.as_ref())
-        .map(points_record);
+    let points = if result.is_some() {
+        historical
+            .forecast
+            .as_ref()
+            .and_then(|forecast| forecast.points.as_ref())
+            .map(points_record)
+    } else {
+        None
+    };
 
     Some(SeasonMatch {
         match_id: historical.id.clone(),
