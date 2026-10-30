@@ -41,7 +41,11 @@ async fn main() -> ExitCode {
 }
 
 async fn run_command(command: Command) -> Result<()> {
-    let config = Config::load().context("failed to load configuration")?;
+    let config = match command {
+        Command::List | Command::Score => Config::load_without_odds(),
+        _ => Config::load(),
+    }
+    .context("failed to load configuration")?;
     init_tracing(&config.log_level)?;
     log_startup(&config)?;
 

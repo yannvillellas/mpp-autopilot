@@ -42,8 +42,8 @@ state path/volume.
 | `LOG_LEVEL`    | `INFO`         | `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`.   |
 
 `MPP_TOKEN` authenticates MPP Autopilot against the MPP app. `ODDS_API_KEY` is
-required: the service refuses to start without it. `WRITE=false` runs the whole
-pipeline without submitting anything.
+required for the service, `once` and `check`; `list` and `score` only need
+`MPP_TOKEN`. `WRITE=false` runs the whole pipeline without submitting anything.
 
 ## Results and season score
 
