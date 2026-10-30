@@ -143,8 +143,8 @@ pub struct HistoryPoints {
     pub extra: Option<i64>,
     /// Additional bonus points.
     pub bonus: Option<i64>,
-    /// Total points reported by MPP.
-    pub total: i64,
+    /// Total points reported by MPP, when present.
+    pub total: Option<i64>,
     /// Rarity label, when provided.
     pub rarity_level: Option<String>,
 }
@@ -689,11 +689,17 @@ fn parse_historical_forecast(raw_match: &Value) -> Option<HistoricalForecast> {
 
 fn parse_history_points(points: Option<&Value>) -> Option<HistoryPoints> {
     let points = points?;
-    let total = parse_i64(points.get("total")?)?;
+    let base = points.get("base").and_then(parse_i64);
+    let exact = points.get("exact").and_then(parse_i64);
+    let total = points.get("total").and_then(parse_i64);
+
+    if total.is_none() && base.is_none() && exact.is_none() {
+        return None;
+    }
 
     Some(HistoryPoints {
-        base: points.get("base").and_then(parse_i64),
-        exact: points.get("exact").and_then(parse_i64),
+        base,
+        exact,
         extra: points.get("extra").and_then(parse_i64),
         bonus: points.get("bonus").and_then(parse_i64),
         total,
@@ -722,6 +728,7 @@ fn parse_i64(value: &Value) -> Option<i64> {
                 .filter(|number| number.is_finite() && number.fract() == 0.0)
                 .map(|number| number as i64)
         })
+        .or_else(|| value.as_str().and_then(|text| text.parse::<i64>().ok()))
 }
 
 fn parse_truthy(value: Option<&Value>) -> bool {
@@ -1076,7 +1083,7 @@ mod tests {
         assert!(finished.is_finished("2026-10-30T00:00:00Z".parse().expect("now")));
         let forecast = finished.forecast.as_ref().expect("forecast");
         assert_eq!(forecast.pick, Score { home: 2, away: 0 });
-        assert_eq!(forecast.points.as_ref().expect("points").total, 78);
+        assert_eq!(forecast.points.as_ref().expect("points").total, Some(78));
         assert_eq!(forecast.points.as_ref().expect("points").exact, Some(30));
         assert!(!forecast.double_points);
 
@@ -1123,6 +1130,41 @@ mod tests {
         let history = parse_forecast_history(&page).expect("partial page");
 
         assert_eq!(history.matches.len(), 2);
+    }
+
+    #[test]
+    fn forecast_history_accepts_a_points_total_as_a_numeric_string() {
+        let mut page = history_json();
+        page["matchesByDate"]["2026-10-26"][0]["userForecast"]["points"]["total"] = json!("78");
+
+        let history = parse_forecast_history(&page).expect("string total");
+        let points = history.matches[1]
+            .forecast
+            .as_ref()
+            .and_then(|forecast| forecast.points.as_ref())
+            .expect("points");
+
+        assert_eq!(points.total, Some(78));
+    }
+
+    #[test]
+    fn forecast_history_accepts_missing_points_total() {
+        let mut page = history_json();
+        page["matchesByDate"]["2026-10-26"][0]["userForecast"]["points"]
+            .as_object_mut()
+            .expect("points object")
+            .remove("total");
+
+        let history = parse_forecast_history(&page).expect("missing total");
+        let points = history.matches[1]
+            .forecast
+            .as_ref()
+            .and_then(|forecast| forecast.points.as_ref())
+            .expect("points");
+
+        assert_eq!(points.total, None);
+        assert_eq!(points.base, Some(48));
+        assert_eq!(points.exact, Some(30));
     }
 
     #[test]
@@ -1191,7 +1233,7 @@ mod tests {
                 .forecast
                 .as_ref()
                 .and_then(|forecast| forecast.points.as_ref())
-                .map(|points| points.total),
+                .and_then(|points| points.total),
             Some(78)
         );
         assert_eq!(history.next_before_date.as_deref(), Some("2026-10-19"));

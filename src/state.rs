@@ -98,8 +98,9 @@ pub struct PointsRecord {
     /// Additional bonus points.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bonus: Option<i64>,
-    /// Total points reported by MPP.
-    pub total: i64,
+    /// Total points reported by MPP, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<i64>,
     /// Rarity label, when provided.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rarity_level: Option<String>,

@@ -48,9 +48,9 @@ pub fn score_report(state: &State) -> String {
 
         let season = totals.entry(row.season).or_default();
         let (points, estimated) = match (&row.points, row.computed_points) {
-            (Some(points), _) => (Some(points.total), false),
-            (None, Some(computed)) => (Some(computed.round() as i64), true),
-            (None, None) => (None, false),
+            (Some(points), _) if points.total.is_some() => (points.total, false),
+            (_, Some(computed)) => (Some(computed.round() as i64), true),
+            _ => (None, false),
         };
         let points_text = match points {
             Some(points) if estimated => format!("~{points}"),
@@ -171,7 +171,7 @@ mod tests {
                 exact: Some(30),
                 extra: Some(0),
                 bonus: Some(0),
-                total: 78,
+                total: Some(78),
                 rarity_level: None,
             }),
             computed_points: Some(78.0),
@@ -236,7 +236,7 @@ mod tests {
     #[test]
     fn report_marks_computed_points_when_mpp_points_are_missing() {
         let mut row = played_match();
-        row.points = None;
+        row.points.as_mut().expect("points").total = None;
 
         let mut state = State::new(Mode::Write);
         state.season_matches.insert("match-1".to_owned(), row);

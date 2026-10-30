@@ -352,7 +352,7 @@ fn season_match(kickoff: DateTime<Utc>) -> SeasonMatch {
             exact: Some(30),
             extra: Some(0),
             bonus: Some(0),
-            total: 78,
+            total: Some(78),
             rarity_level: Some("rare".to_owned()),
         }),
         computed_points: Some(78.0),
@@ -387,7 +387,7 @@ fn forecast_record_and_season_ledger_roundtrip_through_the_state_file() {
 
     assert_eq!(loaded, state);
     let row = &loaded.season_matches["match-1"];
-    assert_eq!(row.points.as_ref().expect("points").total, 78);
+    assert_eq!(row.points.as_ref().expect("points").total, Some(78));
     assert_eq!(
         loaded.matches["match-1"]
             .forecast
@@ -418,7 +418,7 @@ fn season_match_merge_keeps_write_time_data_and_fills_the_result() {
     assert!(stored.merge(newer));
 
     assert_eq!(stored.result, Some(Score { home: 2, away: 0 }));
-    assert_eq!(stored.points.as_ref().expect("points").total, 78);
+    assert_eq!(stored.points.as_ref().expect("points").total, Some(78));
     assert_eq!(stored.computed_points, Some(78.0));
     assert_eq!(stored.source, Some(ForecastOrigin::Market));
     assert_eq!(stored.observed_at, at(24, 1));

@@ -1014,12 +1014,16 @@ fn verify_points(row: &SeasonMatch) {
     let expected = points
         .base
         .zip(points.exact)
-        .map_or(points.total, |(base, exact)| base + exact);
+        .map(|(base, exact)| base + exact)
+        .or(points.total);
+    let Some(expected) = expected else {
+        return;
+    };
 
     if (computed - expected as f64).abs() > 0.5 {
         warn!(
             match_id = %row.match_id,
-            app_total = points.total,
+            app_total = ?points.total,
             computed,
             base = ?points.base,
             exact = ?points.exact,
