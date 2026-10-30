@@ -209,6 +209,7 @@ async fn once(config: &Config, mode: Mode) -> Result<()> {
         writes = report.writes,
         unchanged = report.unchanged,
         dry_writes = report.dry_writes,
+        finished = report.finished,
         skipped = report.skipped,
         "once complete"
     );

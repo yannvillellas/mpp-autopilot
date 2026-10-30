@@ -15,7 +15,7 @@
 //! drop the whole pass; ratings reused from that cache are logged with their
 //! age.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::path::PathBuf;
 
@@ -46,8 +46,11 @@ pub struct RunReport {
     /// dry-run does not read MPP and therefore cannot detect a pick already
     /// registered there.
     pub dry_writes: usize,
-    /// Triggers skipped for missing data, model errors, a passed kickoff or
-    /// a non-transient write failure.
+    /// Matches whose pending pre-match triggers were closed because kickoff
+    /// had already passed. Counted once per match, not once per trigger.
+    pub finished: usize,
+    /// Triggers skipped for missing data, model errors or a non-transient
+    /// write failure.
     pub skipped: usize,
 }
 
@@ -58,6 +61,7 @@ impl RunReport {
         self.writes += other.writes;
         self.unchanged += other.unchanged;
         self.dry_writes += other.dry_writes;
+        self.finished += other.finished;
         self.skipped += other.skipped;
     }
 }
@@ -160,8 +164,9 @@ impl<'a, M: MppApi, E: EloSite, O: OddsSite> Orchestrator<'a, M, E, O> {
     pub async fn daily_pass(&mut self, now: DateTime<Utc>) -> Result<RunReport, RunError> {
         let Snapshot { matches, .. } = self.mpp.fetch_snapshot().await?;
         let count = matches.len();
+        let live: BTreeSet<String> = matches.iter().map(|fixture| fixture.id.clone()).collect();
 
-        self.state.purge(now);
+        self.state.purge_missing(&live);
 
         let mut fixtures = HashMap::with_capacity(count);
         for fixture in matches {
@@ -190,7 +195,7 @@ impl<'a, M: MppApi, E: EloSite, O: OddsSite> Orchestrator<'a, M, E, O> {
         self.fixtures = fixtures;
         self.state.save(&self.state_path)?;
         self.snapshot_loaded = true;
-        info!(matches = count, "daily MPP fetch complete");
+        info!(matches = count, at = %now, "daily MPP fetch complete");
 
         Ok(RunReport {
             matches: count,
@@ -227,19 +232,14 @@ impl<'a, M: MppApi, E: EloSite, O: OddsSite> Orchestrator<'a, M, E, O> {
         let mut future = Vec::new();
 
         for (match_id, triggers) in due {
+            if self.state.matches[&match_id].kickoff <= now {
+                self.close_finished_match(&match_id, &triggers, now)?;
+                report.finished += 1;
+                continue;
+            }
+
             for trigger in triggers {
-                if self.state.matches[&match_id].kickoff <= now {
-                    self.mark_trigger(&match_id, trigger, now)?;
-                    report.triggers += 1;
-                    report.skipped += 1;
-                    info!(
-                        match_id = %match_id,
-                        trigger = ?trigger,
-                        "kickoff already passed; trigger marked without write"
-                    );
-                } else {
-                    future.push((match_id.clone(), trigger));
-                }
+                future.push((match_id.clone(), trigger));
             }
         }
 
@@ -648,6 +648,26 @@ impl<'a, M: MppApi, E: EloSite, O: OddsSite> Orchestrator<'a, M, E, O> {
         let triggers = self.trigger_pass(now).await?;
         report.merge(triggers);
         Ok(report)
+    }
+
+    fn close_finished_match(
+        &mut self,
+        match_id: &str,
+        triggers: &[Trigger],
+        now: DateTime<Utc>,
+    ) -> Result<(), RunError> {
+        if let Some(match_state) = self.state.matches.get_mut(match_id) {
+            for trigger in triggers {
+                match_state.record_trigger(*trigger, now);
+            }
+        }
+        self.state.save(&self.state_path)?;
+        info!(
+            match_id = %match_id,
+            triggers = triggers.len(),
+            "match already finished; pending triggers closed"
+        );
+        Ok(())
     }
 
     fn mark_trigger(

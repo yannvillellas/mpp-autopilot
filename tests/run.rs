@@ -604,8 +604,9 @@ async fn past_kickoff_marks_pending_triggers_without_elo() {
 
     let report = runner.execute_once(now()).await.expect("execute once");
 
-    assert_eq!(report.triggers, 4);
-    assert_eq!(report.skipped, 4);
+    assert_eq!(report.triggers, 0);
+    assert_eq!(report.finished, 1);
+    assert_eq!(report.skipped, 0);
     assert_eq!(report.writes, 0);
     assert_eq!(elo.calls(), 0);
     assert!(mpp.writes().is_empty());
@@ -636,8 +637,9 @@ async fn t1_after_kickoff_is_marked_without_fetching() {
 
     let report = runner.execute_once(now()).await.expect("execute once");
 
-    assert_eq!(report.triggers, 1);
-    assert_eq!(report.skipped, 1);
+    assert_eq!(report.triggers, 0);
+    assert_eq!(report.finished, 1);
+    assert_eq!(report.skipped, 0);
     assert_eq!(market.calls(), 0);
     assert_eq!(elo.calls(), 0);
     assert!(mpp.writes().is_empty());
@@ -811,7 +813,7 @@ async fn other_forbidden_responses_still_fail_the_pass() {
 }
 
 #[tokio::test]
-async fn missing_fixture_is_skipped_without_blocking() {
+async fn missing_fixture_is_purged_without_blocking() {
     let mpp = FakeMpp::new(Snapshot {
         clubs: HashMap::new(),
         matches: Vec::new(),
@@ -830,11 +832,12 @@ async fn missing_fixture_is_skipped_without_blocking() {
     let report = runner.execute_once(now()).await.expect("execute once");
 
     assert_eq!(report.matches, 0);
-    assert_eq!(report.triggers, 1);
-    assert_eq!(report.skipped, 1);
+    assert_eq!(report.triggers, 0);
+    assert_eq!(report.finished, 0);
+    assert_eq!(report.skipped, 0);
     assert_eq!(report.writes, 0);
     assert_eq!(elo.calls(), 0);
-    assert!(runner.state().matches["match-1"].is_trigger_done(Trigger::Publish));
+    assert!(!runner.state().matches.contains_key("match-1"));
     assert!(mpp.writes().is_empty());
 }
 
@@ -854,16 +857,17 @@ async fn missing_fixture_does_not_block_other_matches() {
     let report = runner.execute_once(now()).await.expect("execute once");
 
     assert_eq!(report.matches, 1);
-    assert_eq!(report.triggers, 2);
+    assert_eq!(report.triggers, 1);
     assert_eq!(report.writes, 1);
-    assert_eq!(report.skipped, 1);
+    assert_eq!(report.finished, 0);
+    assert_eq!(report.skipped, 0);
     assert_eq!(elo.calls(), 1);
     assert_eq!(
         mpp.writes(),
         vec![("match-1".to_owned(), Score { home: 1, away: 2 })]
     );
     assert!(runner.state().matches["match-1"].is_trigger_done(Trigger::Publish));
-    assert!(runner.state().matches["stale-match"].is_trigger_done(Trigger::Publish));
+    assert!(!runner.state().matches.contains_key("stale-match"));
 }
 
 #[tokio::test]
@@ -947,6 +951,50 @@ async fn completed_triggers_are_not_replayed() {
     assert_eq!(mpp.writes().len(), 1);
     assert_eq!(report.writes, 0);
     assert_eq!(report.triggers, 0);
+}
+
+#[tokio::test]
+async fn finished_match_is_not_recreated_blank_every_morning() {
+    let past = now() - Duration::days(4);
+    let mut state = state_with_match(Mode::Write, past);
+    state
+        .matches
+        .get_mut("match-1")
+        .expect("match state")
+        .record_write(Score { home: 2, away: 0 }, now() - Duration::days(4));
+
+    let mpp = FakeMpp::new(snapshot(past));
+    let elo = FakeElo::new(ratings());
+    let dir = TestDir::new();
+    let path = dir.path().join("state.json");
+    let mut runner = Orchestrator::new(&mpp, &elo, Mode::Write, state, path);
+
+    let first = runner.execute_once(now()).await.expect("first pass");
+    assert_eq!(first.finished, 1);
+    assert_eq!(first.triggers, 0);
+    assert_eq!(first.skipped, 0);
+    assert_eq!(
+        runner.state().matches["match-1"].written_score(),
+        Some("2-0")
+    );
+
+    let second = runner
+        .execute_once(now() + Duration::days(1))
+        .await
+        .expect("second pass");
+    assert_eq!(second.finished, 0);
+    assert_eq!(second.triggers, 0);
+    assert_eq!(second.skipped, 0);
+    assert_eq!(
+        runner.state().matches["match-1"].written_score(),
+        Some("2-0")
+    );
+    for trigger in Trigger::ALL {
+        assert!(
+            runner.state().matches["match-1"].is_trigger_done(trigger),
+            "{trigger:?} should stay closed"
+        );
+    }
 }
 
 #[tokio::test]

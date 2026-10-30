@@ -1,5 +1,6 @@
 //! Persisted-state integration tests.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -270,24 +271,33 @@ fn loading_with_the_same_mode_keeps_triggers() {
 }
 
 #[test]
-fn purge_removes_only_matches_older_than_three_days() {
-    let now = at(19, 12);
+fn purge_missing_removes_only_matches_absent_from_the_snapshot() {
     let mut state = State::new(Mode::Dry);
-    for (id, kickoff) in [
-        ("old", now - Duration::days(4)),
-        ("boundary", now - Duration::days(3)),
-        ("recent", now - Duration::days(1)),
-    ] {
+    for id in ["listed", "absent"] {
         state
             .matches
-            .insert(id.to_owned(), MatchState::new(kickoff));
+            .insert(id.to_owned(), MatchState::new(at(19, 12)));
     }
 
-    state.purge(now);
+    let live = BTreeSet::from(["listed".to_owned()]);
+    state.purge_missing(&live);
 
-    assert!(!state.matches.contains_key("old"));
-    assert!(state.matches.contains_key("boundary"));
-    assert!(state.matches.contains_key("recent"));
+    assert!(state.matches.contains_key("listed"));
+    assert!(!state.matches.contains_key("absent"));
+}
+
+#[test]
+fn purge_missing_keeps_a_finished_match_and_its_write_record() {
+    let mut state = State::new(Mode::Write);
+    state
+        .matches
+        .insert("finished".to_owned(), match_state(at(19, 18)));
+
+    state.purge_missing(&BTreeSet::from(["finished".to_owned()]));
+
+    let saved = &state.matches["finished"];
+    assert_eq!(saved.written_score(), Some("1-1"));
+    assert_eq!(saved.last_written_at, Some(at(19, 7)));
 }
 
 #[test]

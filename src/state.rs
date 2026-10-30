@@ -5,15 +5,12 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::elo::EloRatings;
 use crate::model::Score;
-
-/// Matches whose kickoff is older than this many days are purged.
-pub const PURGE_AFTER_DAYS: i64 = 3;
 
 /// Execution mode persisted with the state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,10 +151,12 @@ impl State {
         true
     }
 
-    /// Removes matches whose kickoff is more than [`PURGE_AFTER_DAYS`] old.
-    pub fn purge(&mut self, now: DateTime<Utc>) {
-        let cutoff = now - Duration::days(PURGE_AFTER_DAYS);
-        self.matches.retain(|_, state| state.kickoff >= cutoff);
+    /// Removes matches that the current MPP snapshot no longer lists.
+    ///
+    /// A finished match is kept for as long as the snapshot lists it, so its
+    /// write record survives the daily pass instead of being recreated blank.
+    pub fn purge_missing(&mut self, live: &BTreeSet<String>) {
+        self.matches.retain(|match_id, _| live.contains(match_id));
     }
 }
 
