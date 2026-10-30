@@ -7,6 +7,7 @@
 
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Dixon-Coles low-score dependence parameter.
@@ -72,7 +73,7 @@ impl Outcome {
 }
 
 /// Exact score, in goals.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Score {
     /// Home goals.
     pub home: u8,
@@ -87,7 +88,7 @@ impl fmt::Display for Score {
 }
 
 /// MPP quotations for the three outcomes.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Odds {
     /// Quotation for a home win.
     pub home: f64,
@@ -123,7 +124,7 @@ impl Odds {
 }
 
 /// Expected goals for each team.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Lambdas {
     /// Expected goals for the home team.
     pub home: f64,
@@ -166,6 +167,10 @@ pub struct Prediction {
     pub pick_ev: f64,
     /// Probability of [`Self::pick`] being the exact score.
     pub pick_probability: f64,
+    /// Most probable exact score.
+    pub modal: Score,
+    /// Probability of [`Self::modal`].
+    pub modal_probability: f64,
     /// Outcome maximizing the expected points without the exact-score bonus.
     pub recommendation: Outcome,
     /// Expected points of [`Self::recommendation`].
@@ -258,6 +263,8 @@ fn build_prediction(lambdas: Lambdas, odds: Odds) -> Result<Prediction, ModelErr
     let mut pick = Score { home: 0, away: 0 };
     let mut pick_ev = f64::NEG_INFINITY;
     let mut pick_probability = 0.0;
+    let mut modal = Score { home: 0, away: 0 };
+    let mut modal_probability = 0.0;
 
     for (home, row) in matrix.iter().enumerate() {
         for (away, &probability) in row.iter().enumerate() {
@@ -272,6 +279,10 @@ fn build_prediction(lambdas: Lambdas, odds: Odds) -> Result<Prediction, ModelErr
                 pick = score;
                 pick_ev = ev;
                 pick_probability = probability;
+            }
+            if probability > modal_probability {
+                modal = score;
+                modal_probability = probability;
             }
         }
     }
@@ -292,9 +303,28 @@ fn build_prediction(lambdas: Lambdas, odds: Odds) -> Result<Prediction, ModelErr
         pick,
         pick_ev,
         pick_probability,
+        modal,
+        modal_probability,
         recommendation,
         recommendation_ev,
     })
+}
+
+/// Returns the MPP points earned by `pick` for a final `result`.
+///
+/// An exact score pays the quotation of the result's outcome plus
+/// [`FLAT_BONUS`]; a correct outcome pays the quotation alone; any other pick
+/// pays nothing. The caller supplies the quotations that applied to the
+/// forecast, so a later quotation change cannot rewrite the score.
+pub fn points(pick: Score, result: Score, odds: Odds) -> f64 {
+    let outcome = Outcome::from_score(result);
+    if pick == result {
+        odds.for_outcome(outcome) + FLAT_BONUS
+    } else if Outcome::from_score(pick) == outcome {
+        odds.for_outcome(outcome)
+    } else {
+        0.0
+    }
 }
 
 /// Returns the normalized exact-score grid used by [`predict_from_lambdas`].
@@ -382,6 +412,54 @@ mod tests {
 
     fn reference_lambdas() -> Lambdas {
         lambdas(1684.0983240112262, 1670.9520303480226).expect("valid reference ratings")
+    }
+
+    #[test]
+    fn points_reward_exact_and_correct_outcomes_only() {
+        let odds = Odds {
+            home: 48.0,
+            draw: 155.0,
+            away: 30.0,
+        };
+
+        assert!(
+            (points(Score { home: 2, away: 0 }, Score { home: 2, away: 0 }, odds) - 78.0).abs()
+                < 1e-12
+        );
+        assert!(
+            (points(Score { home: 2, away: 0 }, Score { home: 1, away: 0 }, odds) - 48.0).abs()
+                < 1e-12
+        );
+        assert_eq!(
+            points(Score { home: 1, away: 1 }, Score { home: 1, away: 5 }, odds),
+            0.0
+        );
+    }
+
+    #[test]
+    fn modal_score_is_the_most_probable_cell() {
+        let lambdas = reference_lambdas();
+        let prediction = predict_from_lambdas(
+            lambdas,
+            Odds {
+                home: 81.0,
+                draw: 117.0,
+                away: 112.0,
+            },
+        )
+        .expect("prediction");
+        let matrix = score_matrix(lambdas).expect("matrix");
+
+        let maximum = matrix
+            .iter()
+            .flatten()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!((prediction.modal_probability - maximum).abs() < 1e-12);
+        assert_eq!(
+            matrix[usize::from(prediction.modal.home)][usize::from(prediction.modal.away)],
+            prediction.modal_probability
+        );
     }
 
     #[test]

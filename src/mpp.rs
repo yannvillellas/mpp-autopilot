@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use reqwest::{Method, Response, StatusCode};
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -58,6 +58,97 @@ pub struct Snapshot {
     pub matches: Vec<Fixture>,
 }
 
+/// One page of the authenticated user's forecast history.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ForecastHistory {
+    /// Matches in the page, sorted by kickoff then match id.
+    pub matches: Vec<HistoricalMatch>,
+    /// Cursor to pass as `beforeDate` for the next page, when present.
+    pub next_before_date: Option<String>,
+}
+
+/// A played or scheduled match returned by the forecast history.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HistoricalMatch {
+    /// MPP match id.
+    pub id: String,
+    /// Kickoff in UTC.
+    pub kickoff: DateTime<Utc>,
+    /// Home club id.
+    pub home_club_id: String,
+    /// Away club id.
+    pub away_club_id: String,
+    /// Final home score, when the payload carries one.
+    pub home_score: Option<u8>,
+    /// Final away score, when the payload carries one.
+    pub away_score: Option<u8>,
+    /// MPP match period, such as `fullTime` or `preMatch`.
+    pub period: Option<String>,
+    /// MPP match status, such as `postponed` or `decided`.
+    pub match_status: Option<String>,
+    /// Quotations displayed with the match, when usable.
+    pub quotations: Option<Odds>,
+    /// The user's forecast and its MPP points, when present.
+    pub forecast: Option<HistoricalForecast>,
+}
+
+impl HistoricalMatch {
+    /// Returns the final score when both goals are present.
+    pub fn score(&self) -> Option<Score> {
+        Some(Score {
+            home: self.home_score?,
+            away: self.away_score?,
+        })
+    }
+
+    /// Returns whether the match has finished by `now`.
+    ///
+    /// The payload's `period` is authoritative. When it is absent, a score
+    /// observed two hours after kickoff is treated as final so a live match is
+    /// never scored from a partial result.
+    pub fn is_finished(&self, now: DateTime<Utc>) -> bool {
+        if self.match_status.as_deref().is_some_and(|status| {
+            matches!(status, "postponed" | "abandoned" | "suspended" | "delayed")
+        }) {
+            return false;
+        }
+
+        match self.period.as_deref() {
+            Some("fullTime" | "fullTime90") => true,
+            Some(_) => false,
+            None => self.kickoff + ChronoDuration::hours(2) <= now && self.score().is_some(),
+        }
+    }
+}
+
+/// The user's forecast attached to a historical match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoricalForecast {
+    /// Forecast exact score.
+    pub pick: Score,
+    /// MPP points breakdown, when the match has been scored.
+    pub points: Option<HistoryPoints>,
+    /// Whether a double-points bonus was activated.
+    pub double_points: bool,
+}
+
+/// MPP points breakdown for one forecast.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryPoints {
+    /// Base points for the correct outcome.
+    pub base: Option<i64>,
+    /// Points for an exact score.
+    pub exact: Option<i64>,
+    /// Extra points awarded by MPP.
+    pub extra: Option<i64>,
+    /// Additional bonus points.
+    pub bonus: Option<i64>,
+    /// Total points reported by MPP, when present.
+    pub total: Option<i64>,
+    /// Rarity label, when provided.
+    pub rarity_level: Option<String>,
+}
+
 /// MPP client abstraction used by the orchestrator and tests.
 #[allow(
     async_fn_in_trait,
@@ -78,6 +169,20 @@ pub trait MppApi: Send + Sync {
     /// malformed one. This is the source of truth for idempotence: the local
     /// state only records what the bot itself wrote.
     async fn fetch_forecast(&self, match_id: &str) -> Result<Option<Score>, MppError>;
+
+    /// Fetches the authenticated user's MPP id.
+    async fn fetch_user_id(&self) -> Result<String, MppError>;
+
+    /// Fetches one page of the Ligue 1 forecast history.
+    ///
+    /// `before_date` is the cursor returned by the previous page. The route
+    /// returns three days per page, which covers the daily pass without
+    /// polling.
+    async fn fetch_forecast_history(
+        &self,
+        user_id: &str,
+        before_date: Option<&str>,
+    ) -> Result<ForecastHistory, MppError>;
 }
 
 /// HTTP client for the private MPP API.
@@ -130,6 +235,18 @@ impl MppClient {
     async fn get_json(&self, path: &str) -> Result<Value, MppError> {
         let response = self
             .request(Method::GET, path)
+            .send()
+            .await
+            .map_err(MppError::Network)?;
+        let response = check_response(response).await?;
+        let body = response.bytes().await.map_err(MppError::Network)?;
+        Ok(serde_json::from_slice(&body)?)
+    }
+
+    async fn get_json_query(&self, path: &str, query: &[(&str, &str)]) -> Result<Value, MppError> {
+        let response = self
+            .request(Method::GET, path)
+            .query(query)
             .send()
             .await
             .map_err(MppError::Network)?;
@@ -197,6 +314,25 @@ impl MppApi for MppClient {
         let body = response.bytes().await.map_err(MppError::Network)?;
         let value: Value = serde_json::from_slice(&body)?;
         parse_forecast(&value)
+    }
+
+    async fn fetch_user_id(&self) -> Result<String, MppError> {
+        let value = self.get_json("/user").await?;
+        parse_user_id(&value)
+    }
+
+    async fn fetch_forecast_history(
+        &self,
+        user_id: &str,
+        before_date: Option<&str>,
+    ) -> Result<ForecastHistory, MppError> {
+        let path = format!("/user-match-forecasts/championship/{LIGUE_1_CHAMPIONSHIP_ID}/history");
+        let mut query = vec![("userId", user_id), ("limitDays", "3")];
+        if let Some(before_date) = before_date {
+            query.push(("beforeDate", before_date));
+        }
+        let value = self.get_json_query(&path, &query).await?;
+        parse_forecast_history(&value)
     }
 }
 
@@ -414,6 +550,194 @@ fn parse_odds(quotations: Option<&Value>) -> Option<Odds> {
     };
 
     (odds.home > 0.0 && odds.draw > 0.0 && odds.away > 0.0).then_some(odds)
+}
+
+fn parse_user_id(value: &Value) -> Result<String, MppError> {
+    value
+        .get("id")
+        .and_then(|id| {
+            id.as_str()
+                .map(str::to_owned)
+                .or_else(|| id.as_u64().map(|id| id.to_string()))
+        })
+        .filter(|id| !id.trim().is_empty())
+        .ok_or(MppError::InvalidPayload(
+            "user.id must be a non-empty string or integer",
+        ))
+}
+
+fn parse_forecast_history(value: &Value) -> Result<ForecastHistory, MppError> {
+    let matches_by_date = value
+        .get("matchesByDate")
+        .and_then(Value::as_object)
+        .ok_or(MppError::InvalidPayload("matchesByDate must be an object"))?;
+
+    let mut matches = Vec::new();
+    let mut page_entries = 0;
+    let mut skipped = 0;
+
+    for entries in matches_by_date.values() {
+        let Some(entries) = entries.as_array() else {
+            page_entries += 1;
+            skipped += 1;
+            continue;
+        };
+        for raw_match in entries {
+            page_entries += 1;
+            if let Some(historical) = parse_historical_match(raw_match) {
+                matches.push(historical);
+            } else {
+                skipped += 1;
+            }
+        }
+    }
+
+    if skipped > 0 {
+        warn!(
+            page_entries,
+            parsed = matches.len(),
+            skipped,
+            "skipping unparsable forecast history matches"
+        );
+    }
+
+    if page_entries > 0 && matches.is_empty() {
+        return Err(MppError::InvalidPayload(
+            "forecast history page had matches but none could be parsed",
+        ));
+    }
+
+    matches.sort_by(|left, right| {
+        left.kickoff
+            .cmp(&right.kickoff)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
+    let next_before_date = value
+        .get("nextDate")
+        .and_then(Value::as_str)
+        .filter(|date| !date.trim().is_empty())
+        .map(str::to_owned);
+
+    Ok(ForecastHistory {
+        matches,
+        next_before_date,
+    })
+}
+
+fn parse_historical_match(raw_match: &Value) -> Option<HistoricalMatch> {
+    if raw_match
+        .get("championshipId")
+        .and_then(Value::as_u64)
+        .is_some_and(|id| id != LIGUE_1_CHAMPIONSHIP_ID)
+    {
+        return None;
+    }
+
+    let id = raw_match.get("matchId")?.as_str()?.to_owned();
+    let kickoff = raw_match
+        .get("date")
+        .and_then(Value::as_str)
+        .and_then(|date| DateTime::parse_from_rfc3339(date).ok())
+        .map(|date| date.with_timezone(&Utc))?;
+    let home_club_id = raw_match.get("home")?.get("clubId")?.as_str()?.to_owned();
+    let away_club_id = raw_match.get("away")?.get("clubId")?.as_str()?.to_owned();
+
+    Some(HistoricalMatch {
+        id,
+        kickoff,
+        home_club_id,
+        away_club_id,
+        home_score: parse_goal(raw_match.get("home").and_then(|home| home.get("score"))),
+        away_score: parse_goal(raw_match.get("away").and_then(|away| away.get("score"))),
+        period: raw_match
+            .get("period")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        match_status: raw_match
+            .get("matchStatus")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        quotations: parse_odds(raw_match.get("quotations")),
+        forecast: parse_historical_forecast(raw_match),
+    })
+}
+
+fn parse_historical_forecast(raw_match: &Value) -> Option<HistoricalForecast> {
+    let forecast = raw_match
+        .get("userForecast")
+        .or_else(|| raw_match.get("userForecasts")?.get("general"))?;
+    if forecast.is_null() {
+        return None;
+    }
+
+    let pick = Score {
+        home: parse_goal(forecast.get("homeScore"))?,
+        away: parse_goal(forecast.get("awayScore"))?,
+    };
+
+    Some(HistoricalForecast {
+        pick,
+        points: parse_history_points(forecast.get("points")),
+        double_points: parse_truthy(
+            forecast
+                .get("bonuses")
+                .and_then(|bonuses| bonuses.get("doublePoints")),
+        ),
+    })
+}
+
+fn parse_history_points(points: Option<&Value>) -> Option<HistoryPoints> {
+    let points = points?;
+    let base = points.get("base").and_then(parse_i64);
+    let exact = points.get("exact").and_then(parse_i64);
+    let total = points.get("total").and_then(parse_i64);
+
+    if total.is_none() && base.is_none() && exact.is_none() {
+        return None;
+    }
+
+    Some(HistoryPoints {
+        base,
+        exact,
+        extra: points.get("extra").and_then(parse_i64),
+        bonus: points.get("bonus").and_then(parse_i64),
+        total,
+        rarity_level: points
+            .get("rarityLevel")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+    })
+}
+
+fn parse_goal(value: Option<&Value>) -> Option<u8> {
+    let value = value?;
+    let goals = value
+        .as_u64()
+        .or_else(|| value.as_str()?.parse::<u64>().ok())?;
+    u8::try_from(goals).ok()
+}
+
+fn parse_i64(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|number| i64::try_from(number).ok()))
+        .or_else(|| {
+            value
+                .as_f64()
+                .filter(|number| number.is_finite() && number.fract() == 0.0)
+                .map(|number| number as i64)
+        })
+        .or_else(|| value.as_str().and_then(|text| text.parse::<i64>().ok()))
+}
+
+fn parse_truthy(value: Option<&Value>) -> bool {
+    match value {
+        Some(Value::Bool(value)) => *value,
+        Some(Value::Number(value)) => value.as_i64().is_some_and(|value| value != 0),
+        Some(Value::String(value)) => value == "1" || value.eq_ignore_ascii_case("true"),
+        _ => false,
+    }
 }
 
 /// Extracts the `general` forecast from a user-match-forecasts response.
@@ -700,10 +1024,219 @@ mod tests {
         assert_eq!(body["originPage"], "matchSheet");
     }
 
+    fn history_json() -> Value {
+        json!({
+            "matchesByDate": {
+                "2026-10-26": [
+                    {
+                        "matchId": "m_finished",
+                        "championshipId": 1,
+                        "date": "2026-10-26T18:45:00.000Z",
+                        "period": "fullTime",
+                        "matchStatus": "decided",
+                        "home": { "clubId": "club_psg", "score": 2 },
+                        "away": { "clubId": "club_om", "score": 0 },
+                        "quotations": { "home": 48, "draw": 155, "away": 30 },
+                        "userForecast": {
+                            "homeScore": 2,
+                            "awayScore": 0,
+                            "points": {
+                                "base": 48,
+                                "exact": 30,
+                                "extra": 0,
+                                "bonus": 0,
+                                "total": 78,
+                                "rarityLevel": "rare"
+                            },
+                            "bonuses": { "doublePoints": 0 }
+                        }
+                    }
+                ],
+                "2026-10-25": [
+                    {
+                        "matchId": "m_postponed",
+                        "championshipId": 1,
+                        "date": "2026-10-25T18:45:00.000Z",
+                        "period": "preMatch",
+                        "matchStatus": "postponed",
+                        "home": { "clubId": "club_x", "score": 0 },
+                        "away": { "clubId": "club_y", "score": 0 },
+                        "quotations": { "home": 100, "draw": 100, "away": 100 }
+                    }
+                ]
+            },
+            "beforeDate": "2026-10-22",
+            "nextDate": "2026-10-19"
+        })
+    }
+
+    #[test]
+    fn forecast_history_reads_scores_points_and_the_next_cursor() {
+        let history = parse_forecast_history(&history_json()).expect("parse history");
+
+        assert_eq!(history.matches.len(), 2);
+        assert_eq!(history.next_before_date.as_deref(), Some("2026-10-19"));
+
+        let finished = &history.matches[1];
+        assert_eq!(finished.id, "m_finished");
+        assert_eq!(finished.score(), Some(Score { home: 2, away: 0 }));
+        assert!(finished.is_finished("2026-10-30T00:00:00Z".parse().expect("now")));
+        let forecast = finished.forecast.as_ref().expect("forecast");
+        assert_eq!(forecast.pick, Score { home: 2, away: 0 });
+        assert_eq!(forecast.points.as_ref().expect("points").total, Some(78));
+        assert_eq!(forecast.points.as_ref().expect("points").exact, Some(30));
+        assert!(!forecast.double_points);
+
+        let postponed = &history.matches[0];
+        assert_eq!(postponed.id, "m_postponed");
+        assert!(!postponed.is_finished("2026-10-30T00:00:00Z".parse().expect("now")));
+        assert!(postponed.forecast.is_none());
+    }
+
+    #[test]
+    fn forecast_history_rejects_a_missing_matches_by_date() {
+        assert!(matches!(
+            parse_forecast_history(&json!({ "nextDate": "2026-10-19" })),
+            Err(MppError::InvalidPayload("matchesByDate must be an object"))
+        ));
+    }
+
+    #[test]
+    fn forecast_history_rejects_a_page_that_parses_no_match() {
+        let page = json!({
+            "matchesByDate": {
+                "2026-10-26": [
+                    { "matchId": "broken" }
+                ]
+            }
+        });
+
+        assert!(matches!(
+            parse_forecast_history(&page),
+            Err(MppError::InvalidPayload(
+                "forecast history page had matches but none could be parsed"
+            ))
+        ));
+    }
+
+    #[test]
+    fn forecast_history_keeps_valid_matches_when_one_is_malformed() {
+        let mut page = history_json();
+        page["matchesByDate"]["2026-10-26"]
+            .as_array_mut()
+            .expect("match array")
+            .push(json!({ "matchId": "broken" }));
+
+        let history = parse_forecast_history(&page).expect("partial page");
+
+        assert_eq!(history.matches.len(), 2);
+    }
+
+    #[test]
+    fn forecast_history_accepts_a_points_total_as_a_numeric_string() {
+        let mut page = history_json();
+        page["matchesByDate"]["2026-10-26"][0]["userForecast"]["points"]["total"] = json!("78");
+
+        let history = parse_forecast_history(&page).expect("string total");
+        let points = history.matches[1]
+            .forecast
+            .as_ref()
+            .and_then(|forecast| forecast.points.as_ref())
+            .expect("points");
+
+        assert_eq!(points.total, Some(78));
+    }
+
+    #[test]
+    fn forecast_history_accepts_missing_points_total() {
+        let mut page = history_json();
+        page["matchesByDate"]["2026-10-26"][0]["userForecast"]["points"]
+            .as_object_mut()
+            .expect("points object")
+            .remove("total");
+
+        let history = parse_forecast_history(&page).expect("missing total");
+        let points = history.matches[1]
+            .forecast
+            .as_ref()
+            .and_then(|forecast| forecast.points.as_ref())
+            .expect("points");
+
+        assert_eq!(points.total, None);
+        assert_eq!(points.base, Some(48));
+        assert_eq!(points.exact, Some(30));
+    }
+
+    #[test]
+    fn forecast_history_accepts_an_empty_page() {
+        let history = parse_forecast_history(&json!({ "matchesByDate": {} })).expect("empty page");
+
+        assert!(history.matches.is_empty());
+        assert!(history.next_before_date.is_none());
+    }
+
+    #[test]
+    fn user_id_accepts_strings_and_integers() {
+        assert_eq!(
+            parse_user_id(&json!({ "id": "user-1" })).expect("string id"),
+            "user-1"
+        );
+        assert_eq!(
+            parse_user_id(&json!({ "id": 42 })).expect("integer id"),
+            "42"
+        );
+        assert!(parse_user_id(&json!({})).is_err());
+    }
+
     async fn forecast_client() -> (MockServer, MppClient) {
         let server = MockServer::start().await;
         let client = MppClient::with_base_url("token", server.uri()).expect("client");
         (server, client)
+    }
+
+    #[tokio::test]
+    async fn fetch_user_id_reads_the_authenticated_user() {
+        let (server, client) = forecast_client().await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .and(query_param("application", "mppLfp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "user-1",
+                "username": "yann"
+            })))
+            .mount(&server)
+            .await;
+
+        assert_eq!(client.fetch_user_id().await.expect("user id"), "user-1");
+    }
+
+    #[tokio::test]
+    async fn fetch_forecast_history_reads_scores_and_points() {
+        let (server, client) = forecast_client().await;
+        Mock::given(method("GET"))
+            .and(path("/user-match-forecasts/championship/1/history"))
+            .and(query_param("application", "mppLfp"))
+            .and(query_param("userId", "user-1"))
+            .and(query_param("limitDays", "3"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(history_json()))
+            .mount(&server)
+            .await;
+
+        let history = client
+            .fetch_forecast_history("user-1", None)
+            .await
+            .expect("history");
+
+        assert_eq!(history.matches.len(), 2);
+        assert_eq!(
+            history.matches[1]
+                .forecast
+                .as_ref()
+                .and_then(|forecast| forecast.points.as_ref())
+                .and_then(|points| points.total),
+            Some(78)
+        );
+        assert_eq!(history.next_before_date.as_deref(), Some("2026-10-19"));
     }
 
     #[tokio::test]

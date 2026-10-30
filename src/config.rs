@@ -47,16 +47,28 @@ impl Config {
     /// and a missing `.env` file is not an error.
     pub fn load() -> Result<Self, ConfigError> {
         load_dotenv()?;
-        Self::from_lookup(|key| std::env::var(key).ok())
+        Self::from_lookup(true, |key| std::env::var(key).ok())
     }
 
-    fn from_lookup<F>(lookup: F) -> Result<Self, ConfigError>
+    /// Loads the configuration for commands that do not call the odds API.
+    ///
+    /// `ODDS_API_KEY` is optional here; the read-only `list` and `score`
+    /// commands must work from the MPP token and the state file alone.
+    pub fn load_without_odds() -> Result<Self, ConfigError> {
+        load_dotenv()?;
+        Self::from_lookup(false, |key| std::env::var(key).ok())
+    }
+
+    fn from_lookup<F>(require_odds: bool, lookup: F) -> Result<Self, ConfigError>
     where
         F: Fn(&str) -> Option<String>,
     {
         let mpp_token = optional_value(&lookup, "MPP_TOKEN").ok_or(ConfigError::MissingToken)?;
-        let odds_api_key =
-            optional_value(&lookup, "ODDS_API_KEY").ok_or(ConfigError::MissingOddsKey)?;
+        let odds_api_key = match optional_value(&lookup, "ODDS_API_KEY") {
+            Some(key) => key,
+            None if require_odds => return Err(ConfigError::MissingOddsKey),
+            None => String::new(),
+        };
 
         let write = match optional_value(&lookup, "WRITE").as_deref() {
             None => false,
@@ -211,7 +223,15 @@ mod tests {
     use super::*;
 
     fn config_with(vars: &[(&str, &str)]) -> Result<Config, ConfigError> {
-        Config::from_lookup(|key| {
+        config_with_odds(true, vars)
+    }
+
+    fn config_without_odds(vars: &[(&str, &str)]) -> Result<Config, ConfigError> {
+        config_with_odds(false, vars)
+    }
+
+    fn config_with_odds(require_odds: bool, vars: &[(&str, &str)]) -> Result<Config, ConfigError> {
+        Config::from_lookup(require_odds, |key| {
             vars.iter()
                 .find(|(name, _)| *name == key)
                 .map(|(_, value)| (*value).to_owned())
@@ -287,6 +307,15 @@ mod tests {
             config_with(&[("MPP_TOKEN", "token"), ("ODDS_API_KEY", "   ")]),
             Err(ConfigError::MissingOddsKey)
         ));
+    }
+
+    #[test]
+    fn report_config_does_not_require_the_odds_key() {
+        let config =
+            config_without_odds(&[("MPP_TOKEN", "token")]).expect("report config without odds");
+
+        assert_eq!(config.odds_api_key, "");
+        assert_eq!(config.mpp_token, "token");
     }
 
     #[test]

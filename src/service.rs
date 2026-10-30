@@ -69,7 +69,11 @@ pub async fn run_forever<M: MppApi, E: EloSite, O: OddsSite>(
             match orchestrator.daily_pass(now).await {
                 Ok(report) => {
                     schedule.record_daily_success(Utc::now())?;
-                    info!(matches = report.matches, "daily pass complete");
+                    info!(
+                        matches = report.matches,
+                        results = report.results,
+                        "daily pass complete"
+                    );
                 }
                 Err(error) => {
                     schedule.record_daily_failure(Utc::now());
@@ -91,12 +95,13 @@ pub async fn run_forever<M: MppApi, E: EloSite, O: OddsSite>(
         if schedule.trigger_action(trigger_now, orchestrator.has_snapshot()) {
             match orchestrator.trigger_pass(trigger_now).await {
                 Ok(report) => {
-                    if report.triggers > 0 {
+                    if report.triggers > 0 || report.finished > 0 {
                         info!(
                             triggers = report.triggers,
                             writes = report.writes,
                             unchanged = report.unchanged,
                             dry_writes = report.dry_writes,
+                            finished = report.finished,
                             skipped = report.skipped,
                             "trigger pass complete"
                         );

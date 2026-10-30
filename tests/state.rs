@@ -1,13 +1,17 @@
 //! Persisted-state integration tests.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
 use mpp_autopilot::elo::{EloRatings, MatchResult};
-use mpp_autopilot::model::Score;
-use mpp_autopilot::state::{MatchState, Mode, State, StateError, Trigger};
+use mpp_autopilot::model::{Lambdas, Odds, Score};
+use mpp_autopilot::state::{
+    ForecastOrigin, ForecastRecord, MatchState, Mode, PointsRecord, SeasonMatch, State, StateError,
+    Trigger,
+};
 
 static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
 
@@ -252,6 +256,22 @@ fn loading_with_a_different_mode_resets_triggers() {
 }
 
 #[test]
+fn load_unmodified_keeps_the_persisted_mode_and_triggers() {
+    let dir = TestDir::new();
+    let path = dir.state_path();
+    let mut state = State::new(Mode::Write);
+    state
+        .matches
+        .insert("match-1".to_owned(), match_state(at(23, 18)));
+    state.save(&path).expect("save state");
+
+    let loaded = State::load_unmodified(&path).expect("load state");
+
+    assert_eq!(loaded.mode, Mode::Write);
+    assert!(loaded.matches["match-1"].is_trigger_done(Trigger::Publish));
+}
+
+#[test]
 fn loading_with_the_same_mode_keeps_triggers() {
     let dir = TestDir::new();
     let path = dir.state_path();
@@ -270,24 +290,173 @@ fn loading_with_the_same_mode_keeps_triggers() {
 }
 
 #[test]
-fn purge_removes_only_matches_older_than_three_days() {
-    let now = at(19, 12);
+fn purge_missing_removes_only_matches_absent_from_the_snapshot() {
     let mut state = State::new(Mode::Dry);
-    for (id, kickoff) in [
-        ("old", now - Duration::days(4)),
-        ("boundary", now - Duration::days(3)),
-        ("recent", now - Duration::days(1)),
-    ] {
+    for id in ["listed", "absent"] {
         state
             .matches
-            .insert(id.to_owned(), MatchState::new(kickoff));
+            .insert(id.to_owned(), MatchState::new(at(19, 12)));
     }
 
-    state.purge(now);
+    let live = BTreeSet::from(["listed".to_owned()]);
+    state.purge_missing(&live);
 
-    assert!(!state.matches.contains_key("old"));
-    assert!(state.matches.contains_key("boundary"));
-    assert!(state.matches.contains_key("recent"));
+    assert!(state.matches.contains_key("listed"));
+    assert!(!state.matches.contains_key("absent"));
+}
+
+#[test]
+fn purge_missing_keeps_a_finished_match_and_its_write_record() {
+    let mut state = State::new(Mode::Write);
+    state
+        .matches
+        .insert("finished".to_owned(), match_state(at(19, 18)));
+
+    state.purge_missing(&BTreeSet::from(["finished".to_owned()]));
+
+    let saved = &state.matches["finished"];
+    assert_eq!(saved.written_score(), Some("1-1"));
+    assert_eq!(saved.last_written_at, Some(at(19, 7)));
+}
+
+fn forecast_record(kickoff: DateTime<Utc>) -> ForecastRecord {
+    ForecastRecord {
+        pick: Score { home: 2, away: 0 },
+        odds: Odds {
+            home: 48.0,
+            draw: 155.0,
+            away: 30.0,
+        },
+        source: ForecastOrigin::Market,
+        observed_at: kickoff - Duration::hours(3),
+        lambdas: Lambdas {
+            home: 1.5,
+            away: 1.2,
+        },
+        modal: Score { home: 2, away: 1 },
+        modal_probability: 0.1,
+    }
+}
+
+fn season_match(kickoff: DateTime<Utc>) -> SeasonMatch {
+    SeasonMatch {
+        match_id: "match-1".to_owned(),
+        kickoff,
+        season: SeasonMatch::season_from_kickoff(kickoff),
+        home: "Paris SG".to_owned(),
+        away: "Marseille".to_owned(),
+        pick: Some(Score { home: 2, away: 0 }),
+        result: Some(Score { home: 2, away: 0 }),
+        points: Some(PointsRecord {
+            base: Some(48),
+            exact: Some(30),
+            extra: Some(0),
+            bonus: Some(0),
+            total: Some(78),
+            rarity_level: Some("rare".to_owned()),
+        }),
+        computed_points: Some(78.0),
+        modal_points: Some(48.0),
+        source: Some(ForecastOrigin::Market),
+        odds: Some(Odds {
+            home: 48.0,
+            draw: 155.0,
+            away: 30.0,
+        }),
+        modal: Some(Score { home: 2, away: 1 }),
+        status: Some("decided".to_owned()),
+        observed_at: kickoff + Duration::hours(3),
+    }
+}
+
+#[test]
+fn forecast_record_and_season_ledger_roundtrip_through_the_state_file() {
+    let dir = TestDir::new();
+    let path = dir.state_path();
+    let mut state = State::new(Mode::Write);
+    let mut match_state = MatchState::new(at(23, 18));
+    match_state.forecast = Some(forecast_record(at(23, 18)));
+    state.matches.insert("match-1".to_owned(), match_state);
+    state
+        .season_matches
+        .insert("match-1".to_owned(), season_match(at(23, 18)));
+    state.user_id = Some("user-1".to_owned());
+
+    state.save(&path).expect("save state");
+    let loaded = State::load(&path, Mode::Write).expect("load state");
+
+    assert_eq!(loaded, state);
+    let row = &loaded.season_matches["match-1"];
+    assert_eq!(row.points.as_ref().expect("points").total, Some(78));
+    assert_eq!(
+        loaded.matches["match-1"]
+            .forecast
+            .as_ref()
+            .expect("forecast")
+            .source,
+        ForecastOrigin::Market
+    );
+    assert_eq!(loaded.user_id.as_deref(), Some("user-1"));
+}
+
+#[test]
+fn season_match_merge_keeps_write_time_data_and_fills_the_result() {
+    let mut stored = SeasonMatch {
+        result: None,
+        points: None,
+        computed_points: None,
+        modal_points: None,
+        status: None,
+        ..season_match(at(23, 18))
+    };
+    let mut newer = SeasonMatch {
+        observed_at: at(24, 1),
+        ..season_match(at(23, 18))
+    };
+    newer.computed_points = Some(78.0);
+
+    assert!(stored.merge(newer));
+
+    assert_eq!(stored.result, Some(Score { home: 2, away: 0 }));
+    assert_eq!(stored.points.as_ref().expect("points").total, Some(78));
+    assert_eq!(stored.computed_points, Some(78.0));
+    assert_eq!(stored.source, Some(ForecastOrigin::Market));
+    assert_eq!(stored.observed_at, at(24, 1));
+}
+
+#[test]
+fn season_match_merge_replaces_a_changed_pick_and_drops_stale_metadata() {
+    let mut stored = season_match(at(23, 18));
+    let mut newer = season_match(at(23, 18));
+    newer.pick = Some(Score { home: 1, away: 1 });
+    newer.source = None;
+    newer.odds = None;
+    newer.modal = None;
+    newer.computed_points = None;
+    newer.modal_points = None;
+
+    assert!(stored.merge(newer));
+
+    assert_eq!(stored.pick, Some(Score { home: 1, away: 1 }));
+    assert_eq!(stored.source, None);
+    assert_eq!(stored.odds, None);
+    assert_eq!(stored.modal, None);
+}
+
+#[test]
+fn purge_missing_keeps_the_season_ledger() {
+    let mut state = State::new(Mode::Dry);
+    state
+        .season_matches
+        .insert("match-1".to_owned(), season_match(at(23, 18)));
+    state
+        .matches
+        .insert("match-1".to_owned(), MatchState::new(at(23, 18)));
+
+    state.purge_missing(&BTreeSet::new());
+
+    assert!(state.matches.is_empty());
+    assert!(state.season_matches.contains_key("match-1"));
 }
 
 #[test]

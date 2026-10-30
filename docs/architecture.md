@@ -3,9 +3,12 @@
 ## Runtime flow
 
 1. Once a day, fetch the Ligue 1 clubs and matches from MPP.
-2. Schedule four triggers per match: publication, T-60 minutes, T-5 minutes
+2. Read one page of the authenticated user's forecast history, merge every
+   finished match into the season ledger, and keep matches still listed by the
+   snapshot. Results are read-only: they never feed a forecast or a write.
+3. Schedule four triggers per match: publication, T-60 minutes, T-5 minutes
    and T-1 minutes.
-3. At each trigger, fetch every upcoming Ligue 1 event from The Odds API with
+4. At each trigger, fetch every upcoming Ligue 1 event from The Odds API with
    one request. A fixture whose event has usable `h2h` and 2.5-goal `totals`
    odds is predicted from the market; otherwise the Football-Data Elo path
    answers, falling back to the last successful ratings when the fetch fails.
@@ -199,6 +202,46 @@ failing:
 There is no maximum age: Elo moves only when matches are played, and the age
 stays visible in the logs.
 
+## Results and season score
+
+The daily pass reads one page of
+`GET /user-match-forecasts/championship/1/history` (three days) after the
+snapshot. The route returns the final score, `period`, `matchStatus`, the
+quotations and the user forecast with MPP's own `points` breakdown. The bot
+caches the MPP user id in the state after the first `GET /user` call.
+
+For every finished match with a forecast, the bot stores one row in
+`season_matches`:
+
+- the pick actually scored (MPP history wins over the local record);
+- the final score and MPP status;
+- the MPP points total and breakdown;
+- the points recomputed from the stored quotation and the 30-point exact bonus;
+- the source and the daily-snapshot quotation used by the model, when the
+  local forecast is still available;
+- the modal score and the points it would have earned.
+
+The local `MatchState.forecast` is written on a successful PATCH, and also when
+a read-back confirms the model pick but no record exists yet. The modal score
+and its probability are persisted with it, so the counterfactual can be
+recomputed without replaying the model.
+
+The season ledger is independent of the daily snapshot: `purge_missing` removes
+only matches absent from the snapshot, while `season_matches` survives. A
+finished match that is still listed keeps its write record instead of being
+recreated blank.
+
+MPP's `points.total` is authoritative. The bot recomputes `base + exact` from
+the stored quotation and the result; a difference larger than half a point is
+logged as a scoring-rule mismatch. `extra` and `bonus` are MPP additions the
+model does not price and are kept in the breakdown for analysis.
+
+`mpp-autopilot score` loads the state without applying the current mode (so a
+read-only report never resets triggers), refreshes up to
+`MAX_REPORT_HISTORY_PAGES` pages (30 days) of history, and prints one line per
+match plus the season total and the modal-score counterfactual. Matches without
+a result are printed with their MPP status instead of being silently omitted.
+
 ## Idempotence
 
 In write mode, every trigger reads the `general` forecast back from MPP
@@ -210,10 +253,12 @@ before writing:
   edit in the app is therefore corrected at the next trigger.
 - If the read fails, the bot writes anyway. A wrong or missing score is worse
   than a redundant write.
+- A match with a result in the season ledger is finished: pending triggers are
+  closed without a write, even if the snapshot or kickoff looks inconsistent.
 - Dry-run never reads the forecast and never writes.
 
-The local state is the scheduler memory and an audit trail. It is not the
-source of truth for idempotence.
+The local state is the scheduler memory, an audit trail, and the season ledger.
+It is not the source of truth for idempotence.
 
 ## Persisted state
 
@@ -222,6 +267,7 @@ State is written atomically to `STATE_PATH` with a temporary file and rename.
 ```json
 {
   "mode": "write",
+  "user_id": "user_...",
   "matches": {
     "mpp_championship_match_2640624": {
       "kickoff": "2026-10-23T18:45:00+00:00",
@@ -232,7 +278,36 @@ State is written atomically to `STATE_PATH` with a temporary file and rename.
         "t1": "2026-10-23T18:44:00+00:00"
       },
       "last_written_score": "1-1",
-      "last_written_at": "2026-10-19T05:00:01+00:00"
+      "last_written_at": "2026-10-19T05:00:01+00:00",
+      "forecast": {
+        "pick": { "home": 1, "away": 1 },
+        "odds": { "home": 81.0, "draw": 117.0, "away": 112.0 },
+        "source": "market",
+        "observed_at": "2026-10-19T04:55:00+00:00",
+        "lambdas": { "home": 1.4178, "away": 1.3481 },
+        "modal": { "home": 1, "away": 2 },
+        "modal_probability": 0.09
+      },
+      "result_status": "decided"
+    }
+  },
+  "season_matches": {
+    "mpp_championship_match_2640624": {
+      "match_id": "mpp_championship_match_2640624",
+      "kickoff": "2026-10-23T18:45:00+00:00",
+      "season": 2026,
+      "home": "Paris SG",
+      "away": "OL",
+      "pick": { "home": 2, "away": 0 },
+      "result": { "home": 2, "away": 0 },
+      "points": { "base": 48, "exact": 30, "total": 78 },
+      "computed_points": 78.0,
+      "modal_points": 48.0,
+      "source": "market",
+      "odds": { "home": 48.0, "draw": 155.0, "away": 30.0 },
+      "modal": { "home": 2, "away": 1 },
+      "status": "decided",
+      "observed_at": "2026-10-30T06:00:00+00:00"
     }
   },
   "elo": {
@@ -248,7 +323,13 @@ State is written atomically to `STATE_PATH` with a temporary file and rename.
 ```
 
 `last_written_score` and `last_written_at` are an audit trail. Legacy keys
-`score` and `written_at` are still read. Changing the write mode resets the
-triggers but keeps the audit trail. The `elo` block is omitted until the first
-successful fetch; `applied` and `backfilled_through` are omitted while they are
-empty.
+`score` and `written_at` are still read. `forecast` keeps the pick, the MPP
+quotations used by the model, the source, the lambdas and the modal score;
+`result_status` is the last MPP status seen for the match. `season_matches` is
+the season ledger and is independent of the snapshot: `purge_missing` removes
+only matches that the snapshot no longer lists, so a finished match still
+listed keeps its write record instead of being recreated blank. `user_id` is
+cached after the first `GET /user`. Old state files load because every new field
+defaults; `season_matches`, `user_id` and `elo` are omitted while empty.
+Changing the write mode resets triggers but keeps the audit trail and the
+season ledger.

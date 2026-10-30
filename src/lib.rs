@@ -11,6 +11,7 @@ pub mod elo;
 pub mod model;
 pub mod mpp;
 pub mod odds;
+pub mod report;
 pub mod retry;
 pub mod run;
 pub mod scheduler;

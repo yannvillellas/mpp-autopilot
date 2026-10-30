@@ -1,19 +1,17 @@
-//! Persistent state for match triggers, submitted scores and the Elo cache.
+//! Persistent state for match triggers, submitted scores, the season ledger
+//! and the Elo cache.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::Path;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Datelike, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::elo::EloRatings;
-use crate::model::Score;
-
-/// Matches whose kickoff is older than this many days are purged.
-pub const PURGE_AFTER_DAYS: i64 = 3;
+use crate::model::{Lambdas, Odds, Score};
 
 /// Execution mode persisted with the state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,13 +52,194 @@ impl Trigger {
     pub const ALL: [Self; 4] = [Self::Publish, Self::T60, Self::T5, Self::T1];
 }
 
-/// Persisted state shared by all matches and the Elo cache.
+/// Origin of a forecast written to MPP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForecastOrigin {
+    /// Market odds.
+    Market,
+    /// Fresh Elo ratings.
+    Elo,
+    /// Elo ratings reused from the cache.
+    EloCached,
+}
+
+/// The forecast written for one match, with the inputs needed to score it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForecastRecord {
+    /// Exact score written to MPP.
+    pub pick: Score,
+    /// MPP quotations from the daily snapshot used by the model at write time.
+    pub odds: Odds,
+    /// Prediction source.
+    pub source: ForecastOrigin,
+    /// Observation time of the market odds or Elo ratings.
+    pub observed_at: DateTime<Utc>,
+    /// Expected goals used by the model.
+    pub lambdas: Lambdas,
+    /// Most probable exact score at write time.
+    pub modal: Score,
+    /// Probability of [`Self::modal`].
+    pub modal_probability: f64,
+}
+
+/// MPP points breakdown for one scored match.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PointsRecord {
+    /// Base points for the correct outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<i64>,
+    /// Points for an exact score.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact: Option<i64>,
+    /// Extra points awarded by MPP.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra: Option<i64>,
+    /// Additional bonus points.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bonus: Option<i64>,
+    /// Total points reported by MPP, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<i64>,
+    /// Rarity label, when provided.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rarity_level: Option<String>,
+}
+
+/// One match in the season ledger, scored or still waiting for a result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SeasonMatch {
+    /// MPP match id.
+    pub match_id: String,
+    /// Kickoff in UTC.
+    pub kickoff: DateTime<Utc>,
+    /// Season start year.
+    pub season: u16,
+    /// Home club display name.
+    pub home: String,
+    /// Away club display name.
+    pub away: String,
+    /// Forecast exact score.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pick: Option<Score>,
+    /// Final exact score, once known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<Score>,
+    /// MPP points, once the match has been scored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub points: Option<PointsRecord>,
+    /// Points computed from the forecast quotation and the result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computed_points: Option<f64>,
+    /// Points the modal score would have earned with the same quotation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modal_points: Option<f64>,
+    /// Forecast source, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<ForecastOrigin>,
+    /// Quotations used by the model at write time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub odds: Option<Odds>,
+    /// Most probable score at write time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modal: Option<Score>,
+    /// MPP match status, such as `postponed` or `decided`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Time this ledger row was last observed.
+    pub observed_at: DateTime<Utc>,
+}
+
+impl SeasonMatch {
+    /// Returns the season start year for a kickoff.
+    ///
+    /// Ligue 1 seasons start in the second half of the calendar year.
+    pub fn season_from_kickoff(kickoff: DateTime<Utc>) -> u16 {
+        let year = if kickoff.month() >= 7 {
+            kickoff.year()
+        } else {
+            kickoff.year() - 1
+        };
+        u16::try_from(year).unwrap_or_default()
+    }
+
+    /// Merges a newer observation into this ledger row.
+    ///
+    /// The first observation keeps the write-time forecast data. Later
+    /// observations fill gaps and update the result, MPP points and status.
+    /// Returns whether anything changed.
+    pub fn merge(&mut self, newer: Self) -> bool {
+        let mut changed = false;
+
+        if self.pick != newer.pick {
+            self.pick = newer.pick;
+            self.source = newer.source;
+            self.odds = newer.odds;
+            self.modal = newer.modal;
+            self.computed_points = newer.computed_points;
+            self.modal_points = newer.modal_points;
+            changed = true;
+        } else {
+            if self.source.is_none() && newer.source.is_some() {
+                self.source = newer.source;
+                changed = true;
+            }
+            if self.odds.is_none() && newer.odds.is_some() {
+                self.odds = newer.odds;
+                changed = true;
+            }
+            if self.modal.is_none() && newer.modal.is_some() {
+                self.modal = newer.modal;
+                changed = true;
+            }
+            if self.computed_points.is_none() && newer.computed_points.is_some() {
+                self.computed_points = newer.computed_points;
+                changed = true;
+            }
+            if self.modal_points.is_none() && newer.modal_points.is_some() {
+                self.modal_points = newer.modal_points;
+                changed = true;
+            }
+        }
+
+        if newer.result.is_some() && self.result != newer.result {
+            self.result = newer.result;
+            self.computed_points = newer.computed_points;
+            self.modal_points = newer.modal_points;
+            changed = true;
+        }
+
+        if newer.points.is_some() && self.points != newer.points {
+            self.points = newer.points;
+            changed = true;
+        }
+
+        if newer.status.is_some() && self.status != newer.status {
+            self.status = newer.status;
+            changed = true;
+        }
+
+        if changed {
+            self.observed_at = newer.observed_at;
+        }
+
+        changed
+    }
+}
+
+/// Persisted state shared by all matches, the season ledger and the Elo cache.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct State {
     /// Last execution mode.
     pub mode: Mode,
     /// Match state, keyed by MPP match id.
     pub matches: BTreeMap<String, MatchState>,
+    /// Matches kept for the season total, keyed by MPP match id.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub season_matches: BTreeMap<String, SeasonMatch>,
+    /// Authenticated MPP user id, cached after the first fetch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
     /// Last successfully fetched Elo ratings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elo: Option<CachedElo>,
@@ -72,6 +251,8 @@ impl State {
         Self {
             mode,
             matches: BTreeMap::new(),
+            season_matches: BTreeMap::new(),
+            user_id: None,
             elo: None,
         }
     }
@@ -104,13 +285,19 @@ impl State {
     /// the new mode can run them. Callers must save the returned state to
     /// persist that reset.
     pub fn load(path: &Path, mode: Mode) -> Result<Self, StateError> {
+        let mut state = Self::load_unmodified(path)?;
+        state.apply_mode(mode);
+        Ok(state)
+    }
+
+    /// Loads the state file without applying the current mode.
+    ///
+    /// Read-only reports use this so inspecting the ledger never resets
+    /// triggers when the configured mode differs from the persisted one.
+    pub fn load_unmodified(path: &Path) -> Result<Self, StateError> {
         match fs::read_to_string(path) {
-            Ok(contents) => {
-                let mut state: Self = serde_json::from_str(&contents)?;
-                state.apply_mode(mode);
-                Ok(state)
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Self::new(mode)),
+            Ok(contents) => Ok(serde_json::from_str(&contents)?),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Self::new(Mode::Dry)),
             Err(error) => Err(StateError::Io(error)),
         }
     }
@@ -154,10 +341,25 @@ impl State {
         true
     }
 
-    /// Removes matches whose kickoff is more than [`PURGE_AFTER_DAYS`] old.
-    pub fn purge(&mut self, now: DateTime<Utc>) {
-        let cutoff = now - Duration::days(PURGE_AFTER_DAYS);
-        self.matches.retain(|_, state| state.kickoff >= cutoff);
+    /// Removes matches that the current MPP snapshot no longer lists.
+    ///
+    /// A finished match is kept for as long as the snapshot lists it, so its
+    /// write record survives the daily pass instead of being recreated blank.
+    pub fn purge_missing(&mut self, live: &BTreeSet<String>) {
+        self.matches.retain(|match_id, _| live.contains(match_id));
+    }
+
+    /// Inserts or merges one season-ledger row.
+    ///
+    /// Returns whether the stored row changed.
+    pub fn record_season_match(&mut self, scored: SeasonMatch) -> bool {
+        match self.season_matches.get_mut(&scored.match_id) {
+            Some(existing) => existing.merge(scored),
+            None => {
+                self.season_matches.insert(scored.match_id.clone(), scored);
+                true
+            }
+        }
     }
 }
 
@@ -188,7 +390,7 @@ impl CachedElo {
 }
 
 /// Persisted state for one match.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MatchState {
     /// Kickoff time in UTC.
     pub kickoff: DateTime<Utc>,
@@ -204,6 +406,12 @@ pub struct MatchState {
     /// Time of the last successful write.
     #[serde(default, alias = "written_at", skip_serializing_if = "Option::is_none")]
     pub last_written_at: Option<DateTime<Utc>>,
+    /// Forecast written to MPP, with the inputs needed to score it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forecast: Option<ForecastRecord>,
+    /// Last observed MPP status for the match, such as `postponed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_status: Option<String>,
 }
 
 impl MatchState {
@@ -214,6 +422,8 @@ impl MatchState {
             triggers: BTreeMap::new(),
             last_written_score: None,
             last_written_at: None,
+            forecast: None,
+            result_status: None,
         }
     }
 
