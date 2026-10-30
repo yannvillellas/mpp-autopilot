@@ -1,7 +1,7 @@
 //! Reference-case and invariants for the expected-points model.
 
 use mpp_autopilot::model::{
-    Lambdas, ModelError, Odds, Outcome, Score, lambdas, predict, predict_from_lambdas,
+    Lambdas, ModelError, Odds, Outcome, Score, lambdas, points, predict, predict_from_lambdas,
 };
 
 const TOLERANCE: f64 = 5e-4;
@@ -67,6 +67,31 @@ fn outcome_probabilities_are_normalized() {
     let expected_ev = prediction.outcomes.for_outcome(outcome) * odds.for_outcome(outcome)
         + prediction.pick_probability * 30.0;
     assert_close(prediction.pick_ev, expected_ev, 1e-9);
+}
+
+#[test]
+fn points_use_the_quotation_of_the_final_outcome() {
+    let odds = Odds {
+        home: 48.0,
+        draw: 155.0,
+        away: 30.0,
+    };
+
+    assert_close(
+        points(Score { home: 2, away: 0 }, Score { home: 2, away: 0 }, odds),
+        78.0,
+        1e-12,
+    );
+    assert_close(
+        points(Score { home: 2, away: 0 }, Score { home: 1, away: 0 }, odds),
+        48.0,
+        1e-12,
+    );
+    assert_close(
+        points(Score { home: 1, away: 1 }, Score { home: 1, away: 5 }, odds),
+        0.0,
+        1e-12,
+    );
 }
 
 #[test]
