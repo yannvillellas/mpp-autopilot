@@ -1,4 +1,5 @@
-//! Persistent state for match triggers, submitted scores and the Elo cache.
+//! Persistent state for match triggers, submitted scores, the season ledger
+//! and the Elo cache.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;

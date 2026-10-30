@@ -11,6 +11,8 @@
 //! missing score is worse than a redundant PATCH.
 //! The persistent state remains the scheduler memory: which triggers already
 //! ran, the kickoff of each match, and an audit trail of what the bot wrote.
+//! The daily pass also merges the MPP forecast history into a season ledger of
+//! final scores and points; results are read-only and never feed a prediction.
 //! It also keeps the last successful Elo ratings, so a fetch failure does not
 //! drop the whole pass; ratings reused from that cache are logged with their
 //! age.
@@ -239,7 +241,12 @@ impl<'a, M: MppApi, E: EloSite, O: OddsSite> Orchestrator<'a, M, E, O> {
         }
 
         if changed {
-            self.state.save(&self.state_path)?;
+            if let Err(error) = self.state.save(&self.state_path) {
+                warn!(
+                    error = %error,
+                    "cannot persist results; they will be read again on the next pass"
+                );
+            }
         }
 
         info!(
