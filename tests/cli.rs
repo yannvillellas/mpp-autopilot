@@ -28,6 +28,10 @@ fn subcommands_are_recognized() {
         parse_args(args(&["check"])),
         Ok(Action::Command(Command::Check))
     );
+    assert_eq!(
+        parse_args(args(&["score"])),
+        Ok(Action::Command(Command::Score))
+    );
 }
 
 #[test]

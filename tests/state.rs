@@ -256,6 +256,22 @@ fn loading_with_a_different_mode_resets_triggers() {
 }
 
 #[test]
+fn load_unmodified_keeps_the_persisted_mode_and_triggers() {
+    let dir = TestDir::new();
+    let path = dir.state_path();
+    let mut state = State::new(Mode::Write);
+    state
+        .matches
+        .insert("match-1".to_owned(), match_state(at(23, 18)));
+    state.save(&path).expect("save state");
+
+    let loaded = State::load_unmodified(&path).expect("load state");
+
+    assert_eq!(loaded.mode, Mode::Write);
+    assert!(loaded.matches["match-1"].is_trigger_done(Trigger::Publish));
+}
+
+#[test]
 fn loading_with_the_same_mode_keeps_triggers() {
     let dir = TestDir::new();
     let path = dir.state_path();

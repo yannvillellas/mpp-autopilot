@@ -13,6 +13,8 @@ pub enum Command {
     List,
     /// Validate configuration and dependencies.
     Check,
+    /// Print the season score and refresh stored results.
+    Score,
 }
 
 /// Parsed command-line action.
@@ -36,7 +38,7 @@ pub enum CliError {
 }
 
 /// Short usage line.
-pub const USAGE: &str = "Usage: mpp-autopilot [once|list|check]";
+pub const USAGE: &str = "Usage: mpp-autopilot [once|list|check|score]";
 
 /// Full help text.
 pub const HELP: &str = "\
@@ -46,6 +48,7 @@ Commands:
   once    Run one daily fetch and the due triggers, then exit
   list    List Ligue 1 matches and quotations
   check   Validate configuration and dependencies
+  score   Print the season score and refresh stored results
   (none)  Run continuously
 
 Options:
@@ -70,6 +73,7 @@ where
         [arg] if arg == "once" => Ok(Action::Command(Command::Once)),
         [arg] if arg == "list" => Ok(Action::Command(Command::List)),
         [arg] if arg == "check" => Ok(Action::Command(Command::Check)),
+        [arg] if arg == "score" => Ok(Action::Command(Command::Score)),
         [arg] => Err(CliError::UnknownArgument(arg.clone())),
         _ => Err(CliError::TooManyArguments),
     }

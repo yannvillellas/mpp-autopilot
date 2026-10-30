@@ -12,6 +12,8 @@ use mpp_autopilot::config::{self, Config};
 use mpp_autopilot::elo::{EloRatings, FootballDataClient};
 use mpp_autopilot::mpp::{MppApi, MppClient};
 use mpp_autopilot::odds::OddsApiClient;
+use mpp_autopilot::report;
+use mpp_autopilot::run;
 use mpp_autopilot::service;
 use mpp_autopilot::state::{Mode, State};
 use tracing::{Level, info, warn};
@@ -49,6 +51,7 @@ async fn run_command(command: Command) -> Result<()> {
         Command::Check => check(&config, mode),
         Command::List => list(&config).await,
         Command::Once => once(&config, mode).await,
+        Command::Score => score(&config).await,
         Command::Run => run_service(&config, mode).await,
     }
 }
@@ -214,6 +217,40 @@ async fn once(config: &Config, mode: Mode) -> Result<()> {
         skipped = report.skipped,
         "once complete"
     );
+    Ok(())
+}
+
+async fn score(config: &Config) -> Result<()> {
+    let mpp = MppClient::new(config.mpp_token.clone()).context("failed to build MPP client")?;
+    let mut state = State::load_unmodified(&config.state_path)
+        .with_context(|| format!("failed to load state {}", config.state_path.display()))?;
+
+    match mpp.fetch_snapshot().await {
+        Ok(snapshot) => {
+            match run::refresh_results(
+                &mpp,
+                &mut state,
+                &config.state_path,
+                &snapshot.clubs,
+                Utc::now(),
+                run::MAX_REPORT_HISTORY_PAGES,
+            )
+            .await
+            {
+                Ok(results) => info!(results, "forecast history refreshed"),
+                Err(error) => warn!(
+                    error = %error,
+                    "cannot refresh the forecast history; reporting the stored ledger"
+                ),
+            }
+        }
+        Err(error) => warn!(
+            error = %error,
+            "cannot read MPP clubs; reporting the stored ledger"
+        ),
+    }
+
+    print!("{}", report::score_report(&state));
     Ok(())
 }
 

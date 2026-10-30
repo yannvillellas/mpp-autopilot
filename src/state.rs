@@ -283,13 +283,19 @@ impl State {
     /// the new mode can run them. Callers must save the returned state to
     /// persist that reset.
     pub fn load(path: &Path, mode: Mode) -> Result<Self, StateError> {
+        let mut state = Self::load_unmodified(path)?;
+        state.apply_mode(mode);
+        Ok(state)
+    }
+
+    /// Loads the state file without applying the current mode.
+    ///
+    /// Read-only reports use this so inspecting the ledger never resets
+    /// triggers when the configured mode differs from the persisted one.
+    pub fn load_unmodified(path: &Path) -> Result<Self, StateError> {
         match fs::read_to_string(path) {
-            Ok(contents) => {
-                let mut state: Self = serde_json::from_str(&contents)?;
-                state.apply_mode(mode);
-                Ok(state)
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Self::new(mode)),
+            Ok(contents) => Ok(serde_json::from_str(&contents)?),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Self::new(Mode::Dry)),
             Err(error) => Err(StateError::Io(error)),
         }
     }

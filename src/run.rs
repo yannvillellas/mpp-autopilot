@@ -17,7 +17,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use thiserror::Error;
@@ -35,6 +35,11 @@ use crate::state::{
     Trigger,
 };
 use crate::teams;
+
+/// Maximum forecast-history pages fetched by the manual score report.
+///
+/// MPP returns three days per page, so the default backfill covers 30 days.
+pub const MAX_REPORT_HISTORY_PAGES: usize = 10;
 
 /// Counters for one orchestrator pass.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -212,29 +217,15 @@ impl<'a, M: MppApi, E: EloSite, O: OddsSite> Orchestrator<'a, M, E, O> {
             matches: count,
             ..RunReport::default()
         };
-        let mut changed = false;
-        let user_id = match self.state.user_id.clone() {
-            Some(user_id) => Some(user_id),
-            None => match self.mpp.fetch_user_id().await {
-                Ok(user_id) => {
-                    self.state.user_id = Some(user_id.clone());
-                    changed = true;
-                    Some(user_id)
-                }
-                Err(error) => {
-                    warn!(
-                        error = %error,
-                        "cannot read the MPP user id; results are left for a later pass"
-                    );
-                    None
-                }
-            },
-        };
+        let had_user_id = self.state.user_id.is_some();
+        let user_id = ensure_user_id(self.mpp, &mut self.state).await;
+        let mut changed = !had_user_id && self.state.user_id.is_some();
 
         if let Some(user_id) = user_id {
             match self.mpp.fetch_forecast_history(&user_id, None).await {
                 Ok(history) => {
-                    let (updates, status_changed) = self.merge_history(&clubs, &history, now);
+                    let (updates, status_changed) =
+                        merge_history_into_state(&mut self.state, &clubs, &history, now);
                     report.results = updates;
                     changed |= updates > 0 || status_changed;
                 }
@@ -711,61 +702,6 @@ impl<'a, M: MppApi, E: EloSite, O: OddsSite> Orchestrator<'a, M, E, O> {
         }
     }
 
-    /// Merges one history page into the season ledger.
-    ///
-    /// Returns the number of ledger rows inserted or updated, and whether a
-    /// match status changed without touching the ledger.
-    fn merge_history(
-        &mut self,
-        clubs: &HashMap<String, Club>,
-        history: &ForecastHistory,
-        now: DateTime<Utc>,
-    ) -> (usize, bool) {
-        let mut updates = 0;
-        let mut status_changed = false;
-
-        for historical in &history.matches {
-            let local = self
-                .state
-                .matches
-                .get(&historical.id)
-                .and_then(|match_state| match_state.forecast.clone());
-
-            if let Some(match_state) = self.state.matches.get_mut(&historical.id) {
-                if match_state.result_status != historical.match_status {
-                    match_state.result_status = historical.match_status.clone();
-                    status_changed = true;
-                }
-            }
-
-            let Some(row) = season_match(clubs, historical, local.as_ref(), now) else {
-                continue;
-            };
-
-            verify_points(&row);
-
-            if let Some(existing) = self.state.season_matches.get(&row.match_id) {
-                if existing.result.is_some()
-                    && row.result.is_some()
-                    && existing.result != row.result
-                {
-                    warn!(
-                        match_id = %row.match_id,
-                        old = ?existing.result,
-                        new = ?row.result,
-                        "MPP result changed; updating the season ledger"
-                    );
-                }
-            }
-
-            if self.state.record_season_match(row) {
-                updates += 1;
-            }
-        }
-
-        (updates, status_changed)
-    }
-
     /// Runs one daily fetch followed by every trigger due at `now`.
     pub async fn execute_once(&mut self, now: DateTime<Utc>) -> Result<RunReport, RunError> {
         let mut report = self.daily_pass(now).await?;
@@ -874,6 +810,113 @@ fn find_market_forecast<'a>(
                 .num_seconds()
                 .abs()
         })
+}
+
+async fn ensure_user_id<M: MppApi>(mpp: &M, state: &mut State) -> Option<String> {
+    if let Some(user_id) = &state.user_id {
+        return Some(user_id.clone());
+    }
+
+    match mpp.fetch_user_id().await {
+        Ok(user_id) => {
+            state.user_id = Some(user_id.clone());
+            Some(user_id)
+        }
+        Err(error) => {
+            warn!(
+                error = %error,
+                "cannot read the MPP user id; results are left for a later pass"
+            );
+            None
+        }
+    }
+}
+
+/// Refreshes the season ledger from the MPP forecast history.
+///
+/// This is the manual backfill used by the score command. The daily pass reads
+/// only one page; the report can walk several pages to recover recent matches.
+/// A failure is returned to the caller so the stored ledger can still be
+/// printed.
+pub async fn refresh_results<M: MppApi>(
+    mpp: &M,
+    state: &mut State,
+    state_path: &Path,
+    clubs: &HashMap<String, Club>,
+    now: DateTime<Utc>,
+    pages: usize,
+) -> Result<usize, RunError> {
+    let Some(user_id) = ensure_user_id(mpp, state).await else {
+        return Ok(0);
+    };
+
+    let mut before = None;
+    let mut updates = 0;
+    for _ in 0..pages {
+        let history = mpp
+            .fetch_forecast_history(&user_id, before.as_deref())
+            .await?;
+        let (page_updates, _) = merge_history_into_state(state, clubs, &history, now);
+        updates += page_updates;
+
+        let Some(next) = history.next_before_date else {
+            break;
+        };
+        if before.as_deref() == Some(next.as_str()) {
+            break;
+        }
+        before = Some(next);
+    }
+
+    state.save(state_path)?;
+    Ok(updates)
+}
+
+fn merge_history_into_state(
+    state: &mut State,
+    clubs: &HashMap<String, Club>,
+    history: &ForecastHistory,
+    now: DateTime<Utc>,
+) -> (usize, bool) {
+    let mut updates = 0;
+    let mut status_changed = false;
+
+    for historical in &history.matches {
+        let local = state
+            .matches
+            .get(&historical.id)
+            .and_then(|match_state| match_state.forecast.clone());
+
+        if let Some(match_state) = state.matches.get_mut(&historical.id) {
+            if match_state.result_status != historical.match_status {
+                match_state.result_status = historical.match_status.clone();
+                status_changed = true;
+            }
+        }
+
+        let Some(row) = season_match(clubs, historical, local.as_ref(), now) else {
+            continue;
+        };
+
+        verify_points(&row);
+
+        if let Some(existing) = state.season_matches.get(&row.match_id) {
+            if existing.result.is_some() && row.result.is_some() && existing.result != row.result {
+                warn!(
+                    match_id = %row.match_id,
+                    old = ?existing.result,
+                    new = ?row.result,
+                    "MPP result changed; updating the season ledger"
+                );
+            }
+        }
+
+        if state.record_season_match(row) {
+            updates += 1;
+        }
+    }
+
+    (updates, status_changed)
 }
 
 /// Builds one season-ledger row from a history match and the local forecast.
