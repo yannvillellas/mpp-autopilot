@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use mpp_autopilot::elo::{EloError, EloRatings, EloSite};
 use mpp_autopilot::model::{self, Lambdas, Odds, Score};
-use mpp_autopilot::mpp::{Club, Fixture, MppApi, MppError, Snapshot};
+use mpp_autopilot::mpp::{Club, Fixture, ForecastHistory, MppApi, MppError, Snapshot};
 use mpp_autopilot::odds::{MarketForecast, OddsError, OddsSite};
 use mpp_autopilot::run::{Orchestrator, RunError};
 use mpp_autopilot::state::{MatchState, Mode, State, Trigger};
@@ -147,6 +147,18 @@ impl MppApi for FakeMpp {
             .expect("forecasts lock")
             .get(match_id)
             .copied())
+    }
+
+    async fn fetch_user_id(&self) -> Result<String, MppError> {
+        Ok("user-1".to_owned())
+    }
+
+    async fn fetch_forecast_history(
+        &self,
+        _user_id: &str,
+        _before_date: Option<&str>,
+    ) -> Result<ForecastHistory, MppError> {
+        Ok(ForecastHistory::default())
     }
 
     async fn submit_forecast(&self, match_id: &str, score: Score) -> Result<(), MppError> {
