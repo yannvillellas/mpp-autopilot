@@ -69,7 +69,11 @@ pub async fn run_forever<M: MppApi, E: EloSite, O: OddsSite>(
             match orchestrator.daily_pass(now).await {
                 Ok(report) => {
                     schedule.record_daily_success(Utc::now())?;
-                    info!(matches = report.matches, "daily pass complete");
+                    info!(
+                        matches = report.matches,
+                        results = report.results,
+                        "daily pass complete"
+                    );
                 }
                 Err(error) => {
                     schedule.record_daily_failure(Utc::now());

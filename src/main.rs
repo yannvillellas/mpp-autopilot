@@ -205,6 +205,7 @@ async fn once(config: &Config, mode: Mode) -> Result<()> {
 
     info!(
         matches = report.matches,
+        results = report.results,
         triggers = report.triggers,
         writes = report.writes,
         unchanged = report.unchanged,

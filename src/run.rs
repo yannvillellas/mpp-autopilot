@@ -25,10 +25,15 @@ use tracing::{info, warn};
 
 use crate::elo::{EloError, EloRatings, EloSite};
 use crate::model::{self, Prediction, Score};
-use crate::mpp::{Fixture, MppApi, MppError, Snapshot};
+use crate::mpp::{
+    Club, Fixture, ForecastHistory, HistoricalMatch, HistoryPoints, MppApi, MppError, Snapshot,
+};
 use crate::odds::{MarketForecast, NoOdds, OddsSite};
 use crate::scheduler;
-use crate::state::{MatchState, Mode, State, StateError, Trigger};
+use crate::state::{
+    ForecastOrigin, ForecastRecord, MatchState, Mode, PointsRecord, SeasonMatch, State, StateError,
+    Trigger,
+};
 use crate::teams;
 
 /// Counters for one orchestrator pass.
@@ -49,6 +54,8 @@ pub struct RunReport {
     /// Matches whose pending pre-match triggers were closed because kickoff
     /// had already passed. Counted once per match, not once per trigger.
     pub finished: usize,
+    /// Season-ledger rows inserted or updated from the forecast history.
+    pub results: usize,
     /// Triggers skipped for missing data, model errors or a non-transient
     /// write failure.
     pub skipped: usize,
@@ -62,6 +69,7 @@ impl RunReport {
         self.unchanged += other.unchanged;
         self.dry_writes += other.dry_writes;
         self.finished += other.finished;
+        self.results += other.results;
         self.skipped += other.skipped;
     }
 }
@@ -161,8 +169,12 @@ impl<'a, M: MppApi, E: EloSite, O: OddsSite> Orchestrator<'a, M, E, O> {
     }
 
     /// Fetches the daily MPP snapshot, updates the state and persists it.
+    ///
+    /// The forecast history is read once per pass after the snapshot. A
+    /// history failure is logged and never fails the pass: results are
+    /// read-only and must not block forecasts.
     pub async fn daily_pass(&mut self, now: DateTime<Utc>) -> Result<RunReport, RunError> {
-        let Snapshot { matches, .. } = self.mpp.fetch_snapshot().await?;
+        let Snapshot { clubs, matches } = self.mpp.fetch_snapshot().await?;
         let count = matches.len();
         let live: BTreeSet<String> = matches.iter().map(|fixture| fixture.id.clone()).collect();
 
@@ -195,12 +207,58 @@ impl<'a, M: MppApi, E: EloSite, O: OddsSite> Orchestrator<'a, M, E, O> {
         self.fixtures = fixtures;
         self.state.save(&self.state_path)?;
         self.snapshot_loaded = true;
-        info!(matches = count, at = %now, "daily MPP fetch complete");
 
-        Ok(RunReport {
+        let mut report = RunReport {
             matches: count,
             ..RunReport::default()
-        })
+        };
+        let mut changed = false;
+        let user_id = match self.state.user_id.clone() {
+            Some(user_id) => Some(user_id),
+            None => match self.mpp.fetch_user_id().await {
+                Ok(user_id) => {
+                    self.state.user_id = Some(user_id.clone());
+                    changed = true;
+                    Some(user_id)
+                }
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        "cannot read the MPP user id; results are left for a later pass"
+                    );
+                    None
+                }
+            },
+        };
+
+        if let Some(user_id) = user_id {
+            match self.mpp.fetch_forecast_history(&user_id, None).await {
+                Ok(history) => {
+                    let (updates, status_changed) = self.merge_history(&clubs, &history, now);
+                    report.results = updates;
+                    changed |= updates > 0 || status_changed;
+                }
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        "forecast history unavailable; results are left for a later pass"
+                    );
+                }
+            }
+        }
+
+        if changed {
+            self.state.save(&self.state_path)?;
+        }
+
+        info!(
+            matches = count,
+            results = report.results,
+            at = %now,
+            "daily MPP fetch complete"
+        );
+
+        Ok(report)
     }
 
     /// Executes every trigger that is due at `now`.
@@ -232,7 +290,12 @@ impl<'a, M: MppApi, E: EloSite, O: OddsSite> Orchestrator<'a, M, E, O> {
         let mut future = Vec::new();
 
         for (match_id, triggers) in due {
-            if self.state.matches[&match_id].kickoff <= now {
+            let has_result = self
+                .state
+                .season_matches
+                .get(&match_id)
+                .is_some_and(|season_match| season_match.result.is_some());
+            if self.state.matches[&match_id].kickoff <= now || has_result {
                 self.close_finished_match(&match_id, &triggers, now)?;
                 report.finished += 1;
                 continue;
@@ -452,6 +515,11 @@ impl<'a, M: MppApi, E: EloSite, O: OddsSite> Orchestrator<'a, M, E, O> {
             };
 
             if remote.score() == Some(prediction.pick) {
+                if let Some(match_state) = self.state.matches.get_mut(&match_id) {
+                    if match_state.forecast.is_none() {
+                        match_state.forecast = Some(forecast_record(&prediction, &fixture, source));
+                    }
+                }
                 log_trigger(
                     &fixture,
                     trigger,
@@ -499,6 +567,7 @@ impl<'a, M: MppApi, E: EloSite, O: OddsSite> Orchestrator<'a, M, E, O> {
                         .expect("match state exists while processing its trigger");
                     match_state.record_write(prediction.pick, now);
                     match_state.record_trigger(trigger, now);
+                    match_state.forecast = Some(forecast_record(&prediction, &fixture, source));
                     log_trigger(
                         &fixture,
                         trigger,
@@ -642,6 +711,61 @@ impl<'a, M: MppApi, E: EloSite, O: OddsSite> Orchestrator<'a, M, E, O> {
         }
     }
 
+    /// Merges one history page into the season ledger.
+    ///
+    /// Returns the number of ledger rows inserted or updated, and whether a
+    /// match status changed without touching the ledger.
+    fn merge_history(
+        &mut self,
+        clubs: &HashMap<String, Club>,
+        history: &ForecastHistory,
+        now: DateTime<Utc>,
+    ) -> (usize, bool) {
+        let mut updates = 0;
+        let mut status_changed = false;
+
+        for historical in &history.matches {
+            let local = self
+                .state
+                .matches
+                .get(&historical.id)
+                .and_then(|match_state| match_state.forecast.clone());
+
+            if let Some(match_state) = self.state.matches.get_mut(&historical.id) {
+                if match_state.result_status != historical.match_status {
+                    match_state.result_status = historical.match_status.clone();
+                    status_changed = true;
+                }
+            }
+
+            let Some(row) = season_match(clubs, historical, local.as_ref(), now) else {
+                continue;
+            };
+
+            verify_points(&row);
+
+            if let Some(existing) = self.state.season_matches.get(&row.match_id) {
+                if existing.result.is_some()
+                    && row.result.is_some()
+                    && existing.result != row.result
+                {
+                    warn!(
+                        match_id = %row.match_id,
+                        old = ?existing.result,
+                        new = ?row.result,
+                        "MPP result changed; updating the season ledger"
+                    );
+                }
+            }
+
+            if self.state.record_season_match(row) {
+                updates += 1;
+            }
+        }
+
+        (updates, status_changed)
+    }
+
     /// Runs one daily fetch followed by every trigger due at `now`.
     pub async fn execute_once(&mut self, now: DateTime<Utc>) -> Result<RunReport, RunError> {
         let mut report = self.daily_pass(now).await?;
@@ -752,6 +876,106 @@ fn find_market_forecast<'a>(
         })
 }
 
+/// Builds one season-ledger row from a history match and the local forecast.
+///
+/// When MPP reports a different pick from the local record, that pick is
+/// authoritative and the local forecast metadata is discarded: its quotation
+/// and source no longer describe what was scored.
+fn season_match(
+    clubs: &HashMap<String, Club>,
+    historical: &HistoricalMatch,
+    local: Option<&ForecastRecord>,
+    now: DateTime<Utc>,
+) -> Option<SeasonMatch> {
+    let history_pick = historical.forecast.as_ref().map(|forecast| forecast.pick);
+    let local = local.filter(|forecast| history_pick.is_none_or(|pick| pick == forecast.pick));
+    let pick = history_pick.or_else(|| local.map(|forecast| forecast.pick))?;
+
+    let result = historical
+        .is_finished(now)
+        .then(|| historical.score())
+        .flatten();
+    let odds = local
+        .map(|forecast| forecast.odds)
+        .or(historical.quotations);
+    let computed_points = result
+        .zip(odds)
+        .map(|(result, odds)| model::points(pick, result, odds));
+    let modal_points = match (result, odds, local.map(|forecast| forecast.modal)) {
+        (Some(result), Some(odds), Some(modal)) => Some(model::points(modal, result, odds)),
+        _ => None,
+    };
+    let points = historical
+        .forecast
+        .as_ref()
+        .and_then(|forecast| forecast.points.as_ref())
+        .map(points_record);
+
+    Some(SeasonMatch {
+        match_id: historical.id.clone(),
+        kickoff: historical.kickoff,
+        season: SeasonMatch::season_from_kickoff(historical.kickoff),
+        home: club_name(clubs, &historical.home_club_id),
+        away: club_name(clubs, &historical.away_club_id),
+        pick: Some(pick),
+        result,
+        points,
+        computed_points,
+        modal_points,
+        source: local.map(|forecast| forecast.source),
+        odds,
+        modal: local.map(|forecast| forecast.modal),
+        status: historical.match_status.clone(),
+        observed_at: now,
+    })
+}
+
+fn club_name(clubs: &HashMap<String, Club>, club_id: &str) -> String {
+    clubs
+        .get(club_id)
+        .map(|club| club.name.clone())
+        .unwrap_or_else(|| club_id.to_owned())
+}
+
+fn points_record(points: &HistoryPoints) -> PointsRecord {
+    PointsRecord {
+        base: points.base,
+        exact: points.exact,
+        extra: points.extra,
+        bonus: points.bonus,
+        total: points.total,
+        rarity_level: points.rarity_level.clone(),
+    }
+}
+
+/// Compares the rule used by the model with MPP's own points breakdown.
+///
+/// `extra` and `bonus` are MPP additions the model does not price, so the
+/// comparison uses `base + exact` when both are available and falls back to
+/// the total otherwise.
+fn verify_points(row: &SeasonMatch) {
+    let (Some(points), Some(computed)) = (&row.points, row.computed_points) else {
+        return;
+    };
+    let expected = points
+        .base
+        .zip(points.exact)
+        .map_or(points.total, |(base, exact)| base + exact);
+
+    if (computed - expected as f64).abs() > 0.5 {
+        warn!(
+            match_id = %row.match_id,
+            app_total = points.total,
+            computed,
+            base = ?points.base,
+            exact = ?points.exact,
+            extra = ?points.extra,
+            bonus = ?points.bonus,
+            "computed points differ from MPP scoring"
+        );
+    }
+}
+
 /// Origin of the Elo ratings used by a trigger pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RatingsSource {
@@ -818,6 +1042,20 @@ impl ForecastSource {
         }
     }
 
+    fn origin(self) -> ForecastOrigin {
+        match self {
+            Self::Market { .. } => ForecastOrigin::Market,
+            Self::Elo {
+                ratings: RatingsSource::Fresh,
+                ..
+            } => ForecastOrigin::Elo,
+            Self::Elo {
+                ratings: RatingsSource::Cached { .. },
+                ..
+            } => ForecastOrigin::EloCached,
+        }
+    }
+
     fn observed_at(self) -> DateTime<Utc> {
         match self {
             Self::Market { observed_at } | Self::Elo { observed_at, .. } => observed_at,
@@ -829,6 +1067,22 @@ impl ForecastSource {
             Self::Market { .. } => 0,
             Self::Elo { ratings, .. } => ratings.age_seconds(),
         }
+    }
+}
+
+fn forecast_record(
+    prediction: &Prediction,
+    fixture: &Fixture,
+    source: ForecastSource,
+) -> ForecastRecord {
+    ForecastRecord {
+        pick: prediction.pick,
+        odds: fixture.odds,
+        source: source.origin(),
+        observed_at: source.observed_at(),
+        lambdas: prediction.lambdas,
+        modal: prediction.modal,
+        modal_probability: prediction.modal_probability,
     }
 }
 
@@ -860,6 +1114,8 @@ fn log_trigger(
         pick = %prediction.pick,
         pick_ev = prediction.pick_ev,
         pick_probability = prediction.pick_probability,
+        modal = %prediction.modal,
+        modal_probability = prediction.modal_probability,
         recommendation = ?prediction.recommendation,
         recommendation_ev = prediction.recommendation_ev,
         remote = %remote,
