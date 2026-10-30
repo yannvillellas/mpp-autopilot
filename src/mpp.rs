@@ -573,15 +573,38 @@ fn parse_forecast_history(value: &Value) -> Result<ForecastHistory, MppError> {
         .ok_or(MppError::InvalidPayload("matchesByDate must be an object"))?;
 
     let mut matches = Vec::new();
+    let mut page_entries = 0;
+    let mut skipped = 0;
+
     for entries in matches_by_date.values() {
         let Some(entries) = entries.as_array() else {
+            page_entries += 1;
+            skipped += 1;
             continue;
         };
         for raw_match in entries {
+            page_entries += 1;
             if let Some(historical) = parse_historical_match(raw_match) {
                 matches.push(historical);
+            } else {
+                skipped += 1;
             }
         }
+    }
+
+    if skipped > 0 {
+        warn!(
+            page_entries,
+            parsed = matches.len(),
+            skipped,
+            "skipping unparsable forecast history matches"
+        );
+    }
+
+    if page_entries > 0 && matches.is_empty() {
+        return Err(MppError::InvalidPayload(
+            "forecast history page had matches but none could be parsed",
+        ));
     }
 
     matches.sort_by(|left, right| {
@@ -1069,6 +1092,45 @@ mod tests {
             parse_forecast_history(&json!({ "nextDate": "2026-10-19" })),
             Err(MppError::InvalidPayload("matchesByDate must be an object"))
         ));
+    }
+
+    #[test]
+    fn forecast_history_rejects_a_page_that_parses_no_match() {
+        let page = json!({
+            "matchesByDate": {
+                "2026-10-26": [
+                    { "matchId": "broken" }
+                ]
+            }
+        });
+
+        assert!(matches!(
+            parse_forecast_history(&page),
+            Err(MppError::InvalidPayload(
+                "forecast history page had matches but none could be parsed"
+            ))
+        ));
+    }
+
+    #[test]
+    fn forecast_history_keeps_valid_matches_when_one_is_malformed() {
+        let mut page = history_json();
+        page["matchesByDate"]["2026-10-26"]
+            .as_array_mut()
+            .expect("match array")
+            .push(json!({ "matchId": "broken" }));
+
+        let history = parse_forecast_history(&page).expect("partial page");
+
+        assert_eq!(history.matches.len(), 2);
+    }
+
+    #[test]
+    fn forecast_history_accepts_an_empty_page() {
+        let history = parse_forecast_history(&json!({ "matchesByDate": {} })).expect("empty page");
+
+        assert!(history.matches.is_empty());
+        assert!(history.next_before_date.is_none());
     }
 
     #[test]
