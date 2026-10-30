@@ -80,7 +80,12 @@ the project overview.
 - Current scope: Ligue 1. Other competitions may come later.
 - MPP Autopilot performs one snapshot fetch per day; do not poll outside the
   scheduled triggers: publication on the daily pass, then T-60, T-5 and T-1.
+  Each daily pass also reads one forecast-history page (three days) for results;
+  results are read-only and never influence forecasts.
   In write mode, each trigger reads the forecast back before writing.
+- The season ledger keeps the pick, final score, MPP points, write-time
+  quotations, source and modal-score counterfactual. The `score` command prints
+  it and can backfill up to 30 days of history.
 - `WRITE=false` by default; writing is opt-in.
 - Elo ratings are computed from Football-Data.co.uk Ligue 1 results. The
   archive is backfilled from 2020/21 once, then each pass applies only new

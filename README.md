@@ -14,6 +14,7 @@ expected points, and writes it to the MPP `general` contest.
 cp .env.example .env   # set MPP_TOKEN and ODDS_API_KEY
 cargo run -- list      # fixtures and quotations
 cargo run -- once      # one daily pass (dry-run by default)
+cargo run -- score     # season score and results
 ```
 
 With Docker:
@@ -44,14 +45,28 @@ state path/volume.
 required: the service refuses to start without it. `WRITE=false` runs the whole
 pipeline without submitting anything.
 
+## Results and season score
+
+The daily pass reads one page of the MPP forecast history and keeps a season
+ledger next to the forecasts: pick, final score, MPP points, the quotation used
+by the model, the source and the points the modal score would have earned.
+Results are read-only and never influence a forecast, a trigger or a write.
+
+`mpp-autopilot score` loads the ledger without changing the service mode,
+refreshes up to 30 days of history, and prints one line per match with the
+season total and the modal-score counterfactual. A match without a result is
+printed with its MPP status (`postponed`, `delayed`, ...) instead of being
+silently omitted.
+
 ## Commands
 
-| Command               | Description                                      |
-| --------------------- | ------------------------------------------------ |
-| `mpp-autopilot`       | Run continuously.                                |
-| `mpp-autopilot once`  | One daily fetch and the due triggers, then exit. |
-| `mpp-autopilot list`  | Print the Ligue 1 fixtures and quotations.       |
-| `mpp-autopilot check` | Validate the configuration and exit.             |
+| Command               | Description                                        |
+| --------------------- | -------------------------------------------------- |
+| `mpp-autopilot`       | Run continuously.                                  |
+| `mpp-autopilot once`  | One daily fetch, results refresh and due triggers. |
+| `mpp-autopilot list`  | Print the Ligue 1 fixtures and quotations.         |
+| `mpp-autopilot check` | Validate the configuration and exit.               |
+| `mpp-autopilot score` | Print the season score and refresh results.        |
 
 ## Backtest
 
