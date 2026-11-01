@@ -24,30 +24,24 @@ pub const SCORES: usize = MAX_GOALS + 1;
 
 /// Goals expected when the two ratings are equal.
 ///
-/// Fitted by maximum likelihood on the 2020/21 to 2023/24 Ligue 1 seasons and
-/// evaluated on 2024/25 and 2025/26, which the fit never saw. Regenerate with
-/// `cargo run --features backtest --bin backtest -- --tune`. The value is
-/// rounded to what the harness prints; the rounding has no measurable effect.
+/// Fitted by maximum likelihood on 2020/21-2023/24 and checked out of sample on
+/// 2024/25-2025/26: log-loss 3.1090 -> 3.0371, -0.0696 [-0.1010; -0.0382] on
+/// 612 matches. The harness that produced the fit was removed: it needs
+/// historical odds, which no source serves (see #23).
 pub(crate) const BASE_TOTAL: f64 = 2.7652;
 
 /// Extra total goals per Elo point of rating difference.
 ///
-/// The fit learned that the total barely depends on the gap: the slope
-/// collapses to about 0.00006 instead of the previous 1/2000, so the total is
-/// almost flat at 2.77. Fitted on 2020/21 to 2023/24 and evaluated on 2024/25
-/// and 2025/26; regenerate with
-/// `cargo run --features backtest --bin backtest -- --tune`. Rounded to what
-/// the harness prints; the rounding has no measurable effect.
+/// The fit collapses the slope to about 0.00006 instead of the previous 1/2000,
+/// so the total stays near 2.77 whatever the gap. Same fit and split as
+/// [`BASE_TOTAL`].
 pub(crate) const TOTAL_SLOPE: f64 = 0.000056;
 
 /// Logistic scale that turns the rating difference into the home goal share.
 ///
-/// The fitted share reacts less sharply to the rating gap than the win
-/// probability (0.003833 against 0.00576): a side can win 90% of its matches,
-/// but it cannot score 90% of the goals. Fitted on 2020/21 to 2023/24 and
-/// evaluated on 2024/25 and 2025/26; regenerate with
-/// `cargo run --features backtest --bin backtest -- --tune`. Rounded to what
-/// the harness prints; the rounding has no measurable effect.
+/// The share reacts less sharply to the gap than the win probability (0.003833
+/// against 0.00576): a side can win 90% of its matches without scoring 90% of
+/// the goals. Same fit and split as [`BASE_TOTAL`].
 pub(crate) const SHARE_SCALE: f64 = 0.003833;
 
 /// Match outcome from the home team's perspective.

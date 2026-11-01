@@ -43,6 +43,8 @@ const REGIONS: &str = "eu";
 const MARKETS: &str = "h2h,totals";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_ERROR_BODY_CHARS: usize = 512;
+/// Bisection iterations for the two solves below. Sixty halvings bring a
+/// bracket of 1000 goals under f64 resolution; the loops are cheap.
 const BISECTION_STEPS: usize = 60;
 
 /// Expected goals derived from one Ligue 1 event's market odds.

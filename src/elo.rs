@@ -1,7 +1,7 @@
 //! Elo ratings computed from Football-Data Ligue 1 results.
 //!
 //! Ratings are built from the `F1.csv` archive published by
-//! <https://football-data.co.uk>, the backtest source; live odds come from MPP.
+//! <https://football-data.co.uk>, the ratings source; live odds come from MPP.
 //! The archive is backfilled once from 2020/21, then each pass fetches the
 //! current season and applies only results that are not already in the
 //! persisted progress. Applied results are identified by season, real date
@@ -141,52 +141,11 @@ impl MatchResult {
     }
 }
 
-/// Decimal odds for one match, in the form Football-Data publishes.
-///
-/// The five prices are the 1X2 prices and the over/under prices of the 2.5
-/// goals line. They are kept together because the market model needs both to
-/// derive expected goals.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct MatchOdds {
-    /// Home-win price.
-    pub home: f64,
-    /// Draw price.
-    pub draw: f64,
-    /// Away-win price.
-    pub away: f64,
-    /// Over 2.5 goals price.
-    pub over: f64,
-    /// Under 2.5 goals price.
-    pub under: f64,
-}
-
-/// The odds sets the backtest compares, parsed from one Football-Data row.
-///
-/// A set is [`None`] when any of its columns is absent or empty. This is how a
-/// source that disappears from the archive is represented: the configuration
-/// simply has no data, instead of the parse failing.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct SeasonOdds {
-    /// Pinnacle closing 1X2 and 2.5-goal prices.
-    pub pinnacle_closing: Option<MatchOdds>,
-    /// Average closing 1X2 and 2.5-goal prices.
-    pub average_closing: Option<MatchOdds>,
-    /// Best closing 1X2 and 2.5-goal prices.
-    pub max_closing: Option<MatchOdds>,
-    /// Pinnacle pre-closing 1X2 prices with the closing 2.5-goal prices.
-    ///
-    /// Both Pinnacle sets share the closing totals so a pre-closing comparison
-    /// isolates the observation time of the 1X2 prices.
-    pub pinnacle_pre_closing: Option<MatchOdds>,
-}
-
-/// One completed Football-Data match with the odds sets found in its row.
+/// One completed Football-Data match parsed from a row.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SeasonMatch {
     /// Score, date and clubs.
     pub result: MatchResult,
-    /// Odds sets present in the row.
-    pub odds: SeasonOdds,
 }
 
 /// Elo ratings indexed by normalized club name.
@@ -295,10 +254,9 @@ impl EloRatings {
     /// Applies one result with an explicit home advantage and K factor.
     ///
     /// The rule is the same as [`Self::apply_results`], which uses [`HFA`] and
-    /// [`BASE_K`]. The backtest uses this entry point to replay the history
-    /// with alternative values without copying the update rule. A non-finite
-    /// home advantage or a negative or non-finite K leaves the ratings
-    /// unchanged.
+    /// [`BASE_K`]. Tests use this entry point to replay the history with
+    /// alternative values without copying the update rule. A non-finite home
+    /// advantage or a negative or non-finite K leaves the ratings unchanged.
     pub fn apply_with(&mut self, result: &MatchResult, hfa: f64, k: f64) -> bool {
         if !hfa.is_finite() || !k.is_finite() || k < 0.0 {
             return false;
@@ -400,10 +358,9 @@ impl FootballDataClient {
 
     /// Downloads one season CSV from the Football-Data archive.
     ///
-    /// The raw body is returned unchanged so a caller that caches the archive,
-    /// such as the backtest, can fingerprint it and parse it with
-    /// [`parse_season_matches`]. The production ratings path uses the same
-    /// request through [`Self::fetch_season`].
+    /// The raw body is returned unchanged so a caller can fingerprint the
+    /// archive before parsing it with [`parse_season_matches`]. The production
+    /// ratings path uses the same request through `fetch_season`.
     pub async fn fetch_season_csv(&self, season: u16) -> Result<String, EloError> {
         let response = self
             .http
@@ -577,12 +534,11 @@ fn parse_season(season: u16, csv: &str) -> Result<Vec<MatchResult>, EloError> {
         .collect())
 }
 
-/// Parses one Football-Data season with the odds sets used by the backtest.
+/// Parses one Football-Data season into completed matches.
 ///
 /// This is the production parser: a BOM is stripped, the header may carry
 /// carriage returns, columns are located by name, and rows without a complete
-/// date and score are skipped. Odds columns that are absent from a season or
-/// empty in a row leave the corresponding [`SeasonOdds`] field at [`None`].
+/// date and score are skipped.
 pub fn parse_season_matches(season: u16, csv: &str) -> Result<Vec<SeasonMatch>, EloError> {
     let csv = csv.strip_prefix('\u{feff}').unwrap_or(csv);
     let mut lines = csv.lines();
@@ -613,19 +569,6 @@ struct Columns {
     away: usize,
     home_goals: usize,
     away_goals: usize,
-    pinnacle_closing: Option<OddsColumns>,
-    average_closing: Option<OddsColumns>,
-    max_closing: Option<OddsColumns>,
-    pinnacle_pre_closing: Option<OddsColumns>,
-}
-
-#[derive(Clone, Copy)]
-struct OddsColumns {
-    home: usize,
-    draw: usize,
-    away: usize,
-    over: usize,
-    under: usize,
 }
 
 impl Columns {
@@ -634,15 +577,6 @@ impl Columns {
             header
                 .iter()
                 .position(|column| column.trim().eq_ignore_ascii_case(name))
-        };
-        let odds = |home: &str, draw: &str, away: &str, over: &str, under: &str| {
-            Some(OddsColumns {
-                home: find(home)?,
-                draw: find(draw)?,
-                away: find(away)?,
-                over: find(over)?,
-                under: find(under)?,
-            })
         };
 
         let missing = |name: &str| EloError::InvalidCsv {
@@ -663,10 +597,6 @@ impl Columns {
             away: find("AwayTeam").ok_or_else(|| missing("AwayTeam"))?,
             home_goals: find("FTHG").ok_or_else(|| missing("FTHG"))?,
             away_goals: find("FTAG").ok_or_else(|| missing("FTAG"))?,
-            pinnacle_closing: odds("PSCH", "PSCD", "PSCA", "PC>2.5", "PC<2.5"),
-            average_closing: odds("AvgCH", "AvgCD", "AvgCA", "AvgC>2.5", "AvgC<2.5"),
-            max_closing: odds("MaxCH", "MaxCD", "MaxCA", "MaxC>2.5", "MaxC<2.5"),
-            pinnacle_pre_closing: odds("PSH", "PSD", "PSA", "PC>2.5", "PC<2.5"),
         })
     }
 
@@ -687,39 +617,6 @@ impl Columns {
                 home_goals: fields.get(self.home_goals)?.trim().parse().ok()?,
                 away_goals: fields.get(self.away_goals)?.trim().parse().ok()?,
             },
-            odds: SeasonOdds {
-                pinnacle_closing: self
-                    .pinnacle_closing
-                    .and_then(|columns| columns.parse(fields)),
-                average_closing: self
-                    .average_closing
-                    .and_then(|columns| columns.parse(fields)),
-                max_closing: self.max_closing.and_then(|columns| columns.parse(fields)),
-                pinnacle_pre_closing: self
-                    .pinnacle_pre_closing
-                    .and_then(|columns| columns.parse(fields)),
-            },
-        })
-    }
-}
-
-impl OddsColumns {
-    fn parse(self, fields: &[String]) -> Option<MatchOdds> {
-        let price = |index: usize| {
-            fields
-                .get(index)?
-                .trim()
-                .parse::<f64>()
-                .ok()
-                .filter(|price| price.is_finite() && *price > 1.0)
-        };
-
-        Some(MatchOdds {
-            home: price(self.home)?,
-            draw: price(self.draw)?,
-            away: price(self.away)?,
-            over: price(self.over)?,
-            under: price(self.under)?,
         })
     }
 }
@@ -954,33 +851,6 @@ mod tests {
         assert_eq!(results[0].home, "Le Havre");
         assert_eq!(results[0].away, "Auxerre");
         assert_eq!(results[0].away_goals, 0);
-    }
-
-    #[test]
-    fn parser_reads_the_backtest_odds_sets_and_leaves_empty_prices_out() {
-        let csv = "Div,Date,HomeTeam,AwayTeam,FTHG,FTAG,PSCH,PSCD,PSCA,PC>2.5,PC<2.5,\
-                   PSH,PSD,PSA,P>2.5,P<2.5,AvgCH,AvgCD,AvgCA,AvgC>2.5,AvgC<2.5\r\n\
-                   F1,16/08/2024,Le Havre,Paris SG,1,4,7.8,5.0,1.35,1.71,2.10,\
-                   7.5,5.1,1.40,1.30,3.00,7.3,4.9,1.37,1.69,2.13\r\n\
-                   F1,17/08/2024,Brest,Marseille,1,5,3.3,3.6,2.1,,,\
-                   3.2,3.55,2.2,1.95,1.85,3.16,3.5,2.15,2.0,1.80\r\n";
-
-        let matches = parse_season_matches(2024, csv).expect("parse CSV");
-
-        assert_eq!(matches.len(), 2);
-        let pinnacle = matches[0].odds.pinnacle_closing.expect("Pinnacle odds");
-        assert!((pinnacle.home - 7.8).abs() < f64::EPSILON);
-        assert!((pinnacle.over - 1.71).abs() < f64::EPSILON);
-        let pre = matches[0]
-            .odds
-            .pinnacle_pre_closing
-            .expect("Pinnacle pre-closing odds");
-        assert!((pre.home - 7.5).abs() < f64::EPSILON);
-        assert!((pre.over - 1.71).abs() < f64::EPSILON);
-        assert!(matches[1].odds.pinnacle_closing.is_none());
-        assert!(matches[1].odds.pinnacle_pre_closing.is_none());
-        assert!(matches[1].odds.average_closing.is_some());
-        assert!(matches[0].odds.max_closing.is_none());
     }
 
     #[test]

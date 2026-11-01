@@ -27,6 +27,7 @@ the project overview.
 - [ ] `cargo fmt`
 - [ ] `cargo clippy --all-targets -- -D warnings`
 - [ ] `cargo test`
+- [ ] `cargo doc --no-deps` prints no warning
 - [ ] No secret in code, logs or commits
 - [ ] `docker compose build` still succeeds
 
