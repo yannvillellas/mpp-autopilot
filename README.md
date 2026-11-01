@@ -49,12 +49,12 @@ required for the service, `once` and `check`; `list` and `score` only need
 
 The daily pass reads one page of the MPP forecast history and keeps a season
 ledger next to the forecasts: pick, final score, MPP points, the quotation used
-by the model, the source and the points the modal score would have earned.
-Results are read-only and never influence a forecast, a trigger or a write.
+by the model, the source and the most probable score. Results are read-only and
+never influence a forecast, a trigger or a write.
 
 `mpp-autopilot score` loads the ledger without changing the service mode,
 refreshes up to 30 days of history, and prints one line per match with the
-season total and the modal-score counterfactual. A match without a result is
+recorded most probable score and the season total. A match without a result is
 printed with its MPP status (`postponed`, `delayed`, ...) instead of being
 silently omitted.
 

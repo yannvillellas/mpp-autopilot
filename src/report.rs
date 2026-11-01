@@ -27,8 +27,8 @@ pub fn score_report(state: &State) -> String {
     let mut output = String::new();
     let _ = writeln!(
         output,
-        "{:<10} {:<30} {:>5} {:>9} {:>7} {:>8} {:>5} {:>9} {:>10}",
-        "date", "fixture", "pick", "result", "points", "computed", "modal", "modal_pts", "source"
+        "{:<10} {:<30} {:>5} {:>9} {:>7} {:>8} {:>5} {:>10}",
+        "date", "fixture", "pick", "result", "points", "computed", "modal", "source"
     );
 
     let mut totals: BTreeMap<u16, SeasonTotals> = BTreeMap::new();
@@ -70,10 +70,6 @@ pub fn score_report(state: &State) -> String {
         if let Some(computed) = row.computed_points {
             season.computed += computed;
         }
-        if let Some(modal_points) = row.modal_points {
-            season.modal_points += modal_points;
-            season.modal_matches += 1;
-        }
 
         let computed = row
             .computed_points
@@ -83,15 +79,11 @@ pub fn score_report(state: &State) -> String {
             .modal
             .map(|score| score.to_string())
             .unwrap_or_else(|| "-".to_owned());
-        let modal_points = row
-            .modal_points
-            .map(|points| format!("{points:.0}"))
-            .unwrap_or_else(|| "-".to_owned());
         let source = source_label(row.source);
 
         let _ = writeln!(
             output,
-            "{date:<10} {fixture:<30} {pick:>5} {result:>9} {points_text:>7} {computed:>8} {modal:>5} {modal_points:>9} {source:>10}"
+            "{date:<10} {fixture:<30} {pick:>5} {result:>9} {points_text:>7} {computed:>8} {modal:>5} {source:>10}"
         );
     }
 
@@ -104,14 +96,12 @@ pub fn score_report(state: &State) -> String {
         };
         let _ = writeln!(
             output,
-            "season {}/{:02}: {} points from {} match(es); computed {:.0}; modal {:.0} from {} match(es){}",
+            "season {}/{:02}: {} points from {} match(es); computed {:.0}{}",
             season,
             (season + 1) % 100,
             totals.points,
             totals.played,
             totals.computed,
-            totals.modal_points,
-            totals.modal_matches,
             estimated
         );
     }
@@ -137,8 +127,6 @@ fn source_label(source: Option<ForecastOrigin>) -> &'static str {
 struct SeasonTotals {
     points: i64,
     computed: f64,
-    modal_points: f64,
-    modal_matches: usize,
     played: usize,
     estimated: usize,
 }
@@ -174,7 +162,6 @@ mod tests {
                 total: Some(78),
             }),
             computed_points: Some(48.0),
-            modal_points: Some(48.0),
             source: Some(ForecastOrigin::Market),
             odds: Some(Odds {
                 home: 48.0,
@@ -198,7 +185,6 @@ mod tests {
             result: None,
             points: None,
             computed_points: None,
-            modal_points: None,
             source: Some(ForecastOrigin::Market),
             odds: Some(Odds {
                 home: 155.0,
@@ -227,7 +213,6 @@ mod tests {
         assert!(report.contains("Paris SG - OL"));
         assert!(report.contains("market"));
         assert!(report.contains("season 2026/27: 78 points from 1 match(es)"));
-        assert!(report.contains("modal 48 from 1 match(es)"));
         assert!(report.contains("pending: 1 match(es) without a result"));
         assert!(report.contains("postponed"));
     }

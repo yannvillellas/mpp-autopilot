@@ -951,10 +951,6 @@ fn season_match(
     let computed_points = result
         .zip(odds)
         .map(|(result, odds)| model::points(pick, result, odds));
-    let modal_points = match (result, odds, local.map(|forecast| forecast.modal)) {
-        (Some(result), Some(odds), Some(modal)) => Some(model::points(modal, result, odds)),
-        _ => None,
-    };
     let points = if result.is_some() {
         historical
             .forecast
@@ -975,7 +971,6 @@ fn season_match(
         result,
         points,
         computed_points,
-        modal_points,
         source: local.map(|forecast| forecast.source),
         odds,
         modal: local.map(|forecast| forecast.modal),

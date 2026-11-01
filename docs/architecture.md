@@ -221,12 +221,11 @@ For every finished match with a forecast, the bot stores one row in
   is not modelled;
 - the source and the daily-snapshot quotation used by the model, when the
   local forecast is still available;
-- the modal score and the points it would have earned.
+- the modal score.
 
 The local `MatchState.forecast` is written on a successful PATCH, and also when
 a read-back confirms the model pick but no record exists yet. The modal score
-and its probability are persisted with it, so the counterfactual can be
-recomputed without replaying the model.
+and its probability are persisted with it.
 
 The season ledger is independent of the daily snapshot: `purge_missing` removes
 only matches absent from the snapshot, while `season_matches` survives. A
@@ -243,8 +242,8 @@ exact score, unknown before kickoff, so it is recorded for analysis only.
 `mpp-autopilot score` loads the state without applying the current mode (so a
 read-only report never resets triggers), refreshes up to
 `MAX_REPORT_HISTORY_PAGES` pages (30 days) of history, and prints one line per
-match plus the season total and the modal-score counterfactual. Matches without
-a result are printed with their MPP status instead of being silently omitted.
+match with the recorded modal score plus the season total. Matches without a
+result are printed with their MPP status instead of being silently omitted.
 
 ## Idempotence
 
@@ -306,7 +305,6 @@ State is written atomically to `STATE_PATH` with a temporary file and rename.
       "result": { "home": 2, "away": 0 },
       "points": { "base": 48, "exact": 78, "extra": 30, "total": 78 },
       "computed_points": 48.0,
-      "modal_points": 48.0,
       "source": "market",
       "odds": { "home": 48.0, "draw": 155.0, "away": 30.0 },
       "modal": { "home": 2, "away": 1 },

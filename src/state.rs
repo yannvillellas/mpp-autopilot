@@ -129,9 +129,6 @@ pub struct SeasonMatch {
     /// Points computed from the forecast quotation and the result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub computed_points: Option<f64>,
-    /// Points the modal score would have earned with the same quotation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub modal_points: Option<f64>,
     /// Forecast source, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<ForecastOrigin>,
@@ -175,7 +172,6 @@ impl SeasonMatch {
             self.odds = newer.odds;
             self.modal = newer.modal;
             self.computed_points = newer.computed_points;
-            self.modal_points = newer.modal_points;
             changed = true;
         } else {
             if self.source.is_none() && newer.source.is_some() {
@@ -194,16 +190,11 @@ impl SeasonMatch {
                 self.computed_points = newer.computed_points;
                 changed = true;
             }
-            if self.modal_points.is_none() && newer.modal_points.is_some() {
-                self.modal_points = newer.modal_points;
-                changed = true;
-            }
         }
 
         if newer.result.is_some() && self.result != newer.result {
             self.result = newer.result;
             self.computed_points = newer.computed_points;
-            self.modal_points = newer.modal_points;
             changed = true;
         }
 
@@ -312,7 +303,6 @@ impl State {
     fn recompute_derived_points(&mut self) {
         for row in self.season_matches.values_mut() {
             row.computed_points = derived_points(row.pick, row.result, row.odds);
-            row.modal_points = derived_points(row.modal, row.result, row.odds);
         }
     }
 

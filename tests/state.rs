@@ -105,7 +105,6 @@ fn loading_recomputes_points_derived_under_the_old_bonus_rule() {
     let mut state = State::new(Mode::Dry);
     let mut row = season_match(at(26, 18));
     row.computed_points = Some(78.0);
-    row.modal_points = Some(78.0);
     state.season_matches.insert("match-1".to_owned(), row);
     state.save(&path).expect("save state");
 
@@ -113,7 +112,40 @@ fn loading_recomputes_points_derived_under_the_old_bonus_rule() {
     let row = &loaded.season_matches["match-1"];
 
     assert_eq!(row.computed_points, Some(48.0));
-    assert_eq!(row.modal_points, Some(48.0));
+    assert_eq!(row.points.as_ref().expect("points").base, Some(48));
+}
+
+#[test]
+fn loading_ignores_a_legacy_modal_points_field() {
+    let dir = TestDir::new();
+    let path = dir.state_path();
+    let json = r#"{
+      "mode": "dry",
+      "matches": {},
+      "season_matches": {
+        "match-1": {
+          "match_id": "match-1",
+          "kickoff": "2026-10-26T18:00:00Z",
+          "season": 2026,
+          "home": "Paris SG",
+          "away": "OL",
+          "pick": { "home": 2, "away": 0 },
+          "result": { "home": 2, "away": 0 },
+          "points": { "base": 48, "exact": 78, "extra": 30, "total": 78 },
+          "computed_points": 48.0,
+          "modal_points": 48.0,
+          "odds": { "home": 48.0, "draw": 155.0, "away": 30.0 },
+          "modal": { "home": 2, "away": 1 },
+          "observed_at": "2026-10-26T21:00:00Z"
+        }
+      }
+    }"#;
+    fs::write(&path, json).expect("write legacy state");
+
+    let loaded = State::load_unmodified(&path).expect("load legacy state");
+    let row = &loaded.season_matches["match-1"];
+
+    assert_eq!(row.computed_points, Some(48.0));
     assert_eq!(row.points.as_ref().expect("points").base, Some(48));
 }
 
@@ -374,7 +406,6 @@ fn season_match(kickoff: DateTime<Utc>) -> SeasonMatch {
             total: Some(78),
         }),
         computed_points: Some(48.0),
-        modal_points: Some(48.0),
         source: Some(ForecastOrigin::Market),
         odds: Some(Odds {
             home: 48.0,
@@ -423,7 +454,6 @@ fn season_match_merge_keeps_write_time_data_and_fills_the_result() {
         result: None,
         points: None,
         computed_points: None,
-        modal_points: None,
         status: None,
         ..season_match(at(23, 18))
     };
@@ -451,7 +481,6 @@ fn season_match_merge_replaces_a_changed_pick_and_drops_stale_metadata() {
     newer.odds = None;
     newer.modal = None;
     newer.computed_points = None;
-    newer.modal_points = None;
 
     assert!(stored.merge(newer));
 
