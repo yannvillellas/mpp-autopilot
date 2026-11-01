@@ -110,7 +110,7 @@ Elo inputs.
 
 When the market cannot answer, ratings are computed by the bot from the Ligue 1
 results published by [Football-Data](https://www.football-data.co.uk), the
-backtest source. The MPP quotations remain the scoring layer; they are not a
+ratings source. The MPP quotations remain the scoring layer; they are not a
 probability source. There is no third-party rating service: the rating is
 deterministic and owned by this project. On 612 out-of-sample matches it
 scored a 1X2 log-loss of 0.9909 against 0.9950 for ClubElo.
@@ -149,10 +149,11 @@ Every parameter is a named constant in `src/elo.rs` with its origin:
 A club with no history starts at `START`; a relegated club keeps its rating so
 it is still there if it comes back.
 
-The rating-to-goals conversion is fitted by the backtest on 2020/21 to 2023/24
-and evaluated on 2024/25 and 2025/26. Its `BASE_TOTAL`, `TOTAL_SLOPE` and
-`SHARE_SCALE` constants live in `src/model.rs`; regenerate them with
-`cargo run --features backtest --bin backtest -- --tune`.
+The rating-to-goals conversion was fitted on 2020/21-2023/24 and evaluated on
+2024/25-2025/26: 612 matches, log-loss 3.1090 -> 3.0371. Its `BASE_TOTAL`,
+`TOTAL_SLOPE` and `SHARE_SCALE` constants live in `src/model.rs`, each carrying
+the measurement that produced it. The tuning harness was removed because no
+source serves the historical odds it needs.
 
 ### Backfill and incremental updates
 
@@ -216,31 +217,33 @@ For every finished match with a forecast, the bot stores one row in
 - the pick actually scored (MPP history wins over the local record);
 - the final score and MPP status;
 - the MPP points total and breakdown;
-- the points recomputed from the stored quotation and the 30-point exact bonus;
+- the points recomputed from the stored quotation, base only: the rarity bonus
+  is not modelled;
 - the source and the daily-snapshot quotation used by the model, when the
   local forecast is still available;
-- the modal score and the points it would have earned.
+- the modal score.
 
 The local `MatchState.forecast` is written on a successful PATCH, and also when
 a read-back confirms the model pick but no record exists yet. The modal score
-and its probability are persisted with it, so the counterfactual can be
-recomputed without replaying the model.
+and its probability are persisted with it.
 
 The season ledger is independent of the daily snapshot: `purge_missing` removes
 only matches absent from the snapshot, while `season_matches` survives. A
 finished match that is still listed keeps its write record instead of being
 recreated blank.
 
-MPP's `points.total` is authoritative. The bot recomputes `base + exact` from
-the stored quotation and the result; a difference larger than half a point is
-logged as a scoring-rule mismatch. `extra` and `bonus` are MPP additions the
-model does not price and are kept in the breakdown for analysis.
+MPP's `points.total` is authoritative. The bot recomputes the base from the
+stored quotation and the result and compares it with MPP's `base`; any
+difference is logged as a scoring mismatch, which means the stored quotation is
+not the one MPP scored with. `extra` and `bonus` are MPP additions the model
+does not price: the rarity bonus depends on the share of winners who picked the
+exact score, unknown before kickoff, so it is recorded for analysis only.
 
 `mpp-autopilot score` loads the state without applying the current mode (so a
 read-only report never resets triggers), refreshes up to
 `MAX_REPORT_HISTORY_PAGES` pages (30 days) of history, and prints one line per
-match plus the season total and the modal-score counterfactual. Matches without
-a result are printed with their MPP status instead of being silently omitted.
+match with the recorded modal score plus the season total. Matches without a
+result are printed with their MPP status instead of being silently omitted.
 
 ## Idempotence
 
@@ -300,9 +303,8 @@ State is written atomically to `STATE_PATH` with a temporary file and rename.
       "away": "OL",
       "pick": { "home": 2, "away": 0 },
       "result": { "home": 2, "away": 0 },
-      "points": { "base": 48, "exact": 30, "total": 78 },
-      "computed_points": 78.0,
-      "modal_points": 48.0,
+      "points": { "base": 48, "exact": 78, "extra": 30, "total": 78 },
+      "computed_points": 48.0,
       "source": "market",
       "odds": { "home": 48.0, "draw": 155.0, "away": 30.0 },
       "modal": { "home": 2, "away": 1 },

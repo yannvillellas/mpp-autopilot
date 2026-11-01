@@ -2,8 +2,8 @@
 //!
 //! Goal counts follow independent Poisson distributions adjusted with the
 //! Dixon-Coles low-score correction. Each exact score is valued with the
-//! probability of its outcome multiplied by the MPP quotation, plus a flat
-//! bonus for the exact score.
+//! probability of its outcome multiplied by the MPP quotation. The rarity bonus
+//! is not priced because it cannot be known before kickoff.
 
 use std::fmt;
 
@@ -16,38 +16,29 @@ pub const RHO: f64 = -0.12;
 /// Highest goal count considered for each team (`0..=MAX_GOALS`).
 pub const MAX_GOALS: usize = 6;
 
-/// MPP bonus points awarded for an exact score.
-pub const FLAT_BONUS: f64 = 30.0;
-
 /// Number of goal counts per team in the score grid.
 pub const SCORES: usize = MAX_GOALS + 1;
 
 /// Goals expected when the two ratings are equal.
 ///
-/// Fitted by maximum likelihood on the 2020/21 to 2023/24 Ligue 1 seasons and
-/// evaluated on 2024/25 and 2025/26, which the fit never saw. Regenerate with
-/// `cargo run --features backtest --bin backtest -- --tune`. The value is
-/// rounded to what the harness prints; the rounding has no measurable effect.
+/// Fitted by maximum likelihood on 2020/21-2023/24 and checked out of sample on
+/// 2024/25-2025/26: log-loss 3.1090 -> 3.0371, -0.0696 [-0.1010; -0.0382] on
+/// 612 matches. The harness that produced the fit was removed: it needs
+/// historical odds, which no source serves (see #23).
 pub(crate) const BASE_TOTAL: f64 = 2.7652;
 
 /// Extra total goals per Elo point of rating difference.
 ///
-/// The fit learned that the total barely depends on the gap: the slope
-/// collapses to about 0.00006 instead of the previous 1/2000, so the total is
-/// almost flat at 2.77. Fitted on 2020/21 to 2023/24 and evaluated on 2024/25
-/// and 2025/26; regenerate with
-/// `cargo run --features backtest --bin backtest -- --tune`. Rounded to what
-/// the harness prints; the rounding has no measurable effect.
+/// The fit collapses the slope to about 0.00006 instead of the previous 1/2000,
+/// so the total stays near 2.77 whatever the gap. Same fit and split as
+/// [`BASE_TOTAL`].
 pub(crate) const TOTAL_SLOPE: f64 = 0.000056;
 
 /// Logistic scale that turns the rating difference into the home goal share.
 ///
-/// The fitted share reacts less sharply to the rating gap than the win
-/// probability (0.003833 against 0.00576): a side can win 90% of its matches,
-/// but it cannot score 90% of the goals. Fitted on 2020/21 to 2023/24 and
-/// evaluated on 2024/25 and 2025/26; regenerate with
-/// `cargo run --features backtest --bin backtest -- --tune`. Rounded to what
-/// the harness prints; the rounding has no measurable effect.
+/// The share reacts less sharply to the gap than the win probability (0.003833
+/// against 0.00576): a side can win 90% of its matches without scoring 90% of
+/// the goals. Same fit and split as [`BASE_TOTAL`].
 pub(crate) const SHARE_SCALE: f64 = 0.003833;
 
 /// Match outcome from the home team's perspective.
@@ -161,9 +152,10 @@ pub struct Prediction {
     pub lambdas: Lambdas,
     /// Probabilities of the three outcomes.
     pub outcomes: OutcomeProbabilities,
-    /// Exact score maximizing the expected points.
+    /// Most probable score of [`Self::recommendation`].
     pub pick: Score,
-    /// Expected points of [`Self::pick`].
+    /// Expected points of [`Self::recommendation`], which [`Self::pick`]
+    /// belongs to.
     pub pick_ev: f64,
     /// Probability of [`Self::pick`] being the exact score.
     pub pick_probability: f64,
@@ -171,10 +163,8 @@ pub struct Prediction {
     pub modal: Score,
     /// Probability of [`Self::modal`].
     pub modal_probability: f64,
-    /// Outcome maximizing the expected points without the exact-score bonus.
+    /// Outcome with the highest expected points.
     pub recommendation: Outcome,
-    /// Expected points of [`Self::recommendation`].
-    pub recommendation_ev: f64,
 }
 
 /// Errors returned by the model.
@@ -260,28 +250,16 @@ fn build_prediction(lambdas: Lambdas, odds: Odds) -> Result<Prediction, ModelErr
     let matrix = score_matrix(lambdas)?;
     let outcomes = outcome_probabilities(&matrix);
 
-    let mut pick = Score { home: 0, away: 0 };
-    let mut pick_ev = f64::NEG_INFINITY;
-    let mut pick_probability = 0.0;
     let mut modal = Score { home: 0, away: 0 };
     let mut modal_probability = 0.0;
 
     for (home, row) in matrix.iter().enumerate() {
         for (away, &probability) in row.iter().enumerate() {
-            let score = Score {
-                home: home as u8,
-                away: away as u8,
-            };
-            let outcome = Outcome::from_score(score);
-            let ev = outcomes.for_outcome(outcome) * odds.for_outcome(outcome)
-                + probability * FLAT_BONUS;
-            if ev > pick_ev {
-                pick = score;
-                pick_ev = ev;
-                pick_probability = probability;
-            }
             if probability > modal_probability {
-                modal = score;
+                modal = Score {
+                    home: home as u8,
+                    away: away as u8,
+                };
                 modal_probability = probability;
             }
         }
@@ -297,30 +275,48 @@ fn build_prediction(lambdas: Lambdas, odds: Odds) -> Result<Prediction, ModelErr
         }
     }
 
+    // The rarity bonus depends on how rare the score turns out to be among the
+    // winners, which is unknown before kickoff, so it is not priced: within the
+    // most profitable outcome the pick is the most probable score.
+    let mut pick = Score { home: 0, away: 0 };
+    let mut pick_probability = 0.0;
+    for (home, row) in matrix.iter().enumerate() {
+        for (away, &probability) in row.iter().enumerate() {
+            let score = Score {
+                home: home as u8,
+                away: away as u8,
+            };
+            if Outcome::from_score(score) == recommendation && probability > pick_probability {
+                pick = score;
+                pick_probability = probability;
+            }
+        }
+    }
+
     Ok(Prediction {
         lambdas,
         outcomes,
         pick,
-        pick_ev,
+        pick_ev: recommendation_ev,
         pick_probability,
         modal,
         modal_probability,
         recommendation,
-        recommendation_ev,
     })
 }
 
-/// Returns the MPP points earned by `pick` for a final `result`.
+/// Returns the MPP base points earned by `pick` for a final `result`.
 ///
-/// An exact score pays the quotation of the result's outcome plus
-/// [`FLAT_BONUS`]; a correct outcome pays the quotation alone; any other pick
-/// pays nothing. The caller supplies the quotations that applied to the
-/// forecast, so a later quotation change cannot rewrite the score.
+/// The base is the quotation of the result's outcome when the pick has that
+/// outcome, and zero otherwise. MPP adds a rarity bonus on top of an exact
+/// score: 20 points when more than 30% of the winners had that score, 30
+/// between 20 and 30%, 50 between 5 and 20%, 70 between 0.5 and 5%, and 100
+/// below 0.5%. That share is only known after kickoff, so the bonus is not
+/// priced here (see #22). The caller supplies the quotations that applied to
+/// the forecast, so a later quotation change cannot rewrite the score.
 pub fn points(pick: Score, result: Score, odds: Odds) -> f64 {
     let outcome = Outcome::from_score(result);
-    if pick == result {
-        odds.for_outcome(outcome) + FLAT_BONUS
-    } else if Outcome::from_score(pick) == outcome {
+    if Outcome::from_score(pick) == outcome {
         odds.for_outcome(outcome)
     } else {
         0.0
@@ -415,7 +411,7 @@ mod tests {
     }
 
     #[test]
-    fn points_reward_exact_and_correct_outcomes_only() {
+    fn points_pay_the_quotation_of_a_correct_outcome() {
         let odds = Odds {
             home: 48.0,
             draw: 155.0,
@@ -423,7 +419,7 @@ mod tests {
         };
 
         assert!(
-            (points(Score { home: 2, away: 0 }, Score { home: 2, away: 0 }, odds) - 78.0).abs()
+            (points(Score { home: 2, away: 0 }, Score { home: 2, away: 0 }, odds) - 48.0).abs()
                 < 1e-12
         );
         assert!(

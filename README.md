@@ -5,8 +5,8 @@ MPP Autopilot is a Rust service that predicts Ligue 1 exact scores for
 [The Odds API](https://the-odds-api.com) into expected goals, falls back to its
 own Elo ratings computed from
 [Football-Data](https://www.football-data.co.uk) Ligue 1 results, combines the
-probabilities with the MPP quotations, picks the score with the highest
-expected points, and writes it to the MPP `general` contest.
+probabilities with the MPP quotations, picks the most probable score of the
+most profitable outcome, and writes it to the MPP `general` contest.
 
 ## Quick start
 
@@ -49,12 +49,12 @@ required for the service, `once` and `check`; `list` and `score` only need
 
 The daily pass reads one page of the MPP forecast history and keeps a season
 ledger next to the forecasts: pick, final score, MPP points, the quotation used
-by the model, the source and the points the modal score would have earned.
-Results are read-only and never influence a forecast, a trigger or a write.
+by the model, the source and the most probable score. Results are read-only and
+never influence a forecast, a trigger or a write.
 
 `mpp-autopilot score` loads the ledger without changing the service mode,
 refreshes up to 30 days of history, and prints one line per match with the
-season total and the modal-score counterfactual. A match without a result is
+recorded most probable score and the season total. A match without a result is
 printed with its MPP status (`postponed`, `delayed`, ...) instead of being
 silently omitted.
 
@@ -68,37 +68,6 @@ silently omitted.
 | `mpp-autopilot check` | Validate the configuration and exit.               |
 | `mpp-autopilot score` | Print the season score and refresh results.        |
 
-## Backtest
-
-The `backtest` feature builds a harness that replays the completed 2024/25 and
-2025/26 Ligue 1 seasons through the production model and Elo path:
-
-```bash
-cargo run --features backtest --bin backtest
-cargo run --features backtest --bin backtest -- --refresh
-cargo run --features backtest --bin backtest -- --check
-cargo run --features backtest --bin backtest -- --tune
-```
-
-The first run downloads the Football-Data seasons into the gitignored
-`backtest-data/` directory and writes `backtest-reference.json`. Commit that
-reference once; `--check` then fails when a metric moves by more than `1e-3` or
-a match count changes. Delete the file and run again to record a deliberate
-model change. A missing odds source is omitted from the table instead of failing
-the run. The binary is behind `required-features`, so release builds and the
-Docker image do not include it.
-
-Every row is paired with `market / pinnacle closing` on the matches both cover:
-the table shows the mean exact-loss difference and its 95% interval. The
-pre-closing row uses the closing totals as well, so it isolates the 1X2
-observation time. The report prints the 0.01 nat noise floor; an interval that
-contains zero is not a result.
-
-`--tune` is a separate mode. It fits the three rating-to-goals coefficients by
-maximum likelihood on 2020/21 to 2023/24, then sweeps `K` and the home advantage
-and ranks the candidates on 2024/25 and 2025/26. The evaluation seasons are
-never used for fitting; a split where the windows overlap is refused.
-
 ## Documentation
 
 - [MPP API reference](docs/mpp-api.md)
@@ -110,14 +79,6 @@ never used for fitting; a split where the windows overlap is refused.
 cargo fmt
 cargo clippy --all-targets -- -D warnings
 cargo test
-```
-
-The backtest code is gated by the feature, so lint and test it explicitly:
-
-```bash
-cargo fmt --check
-cargo clippy --all-targets --features backtest -- -D warnings
-cargo test --features backtest
 ```
 
 ## Disclaimer
