@@ -137,16 +137,15 @@ pub struct HistoricalForecast {
 pub struct HistoryPoints {
     /// Base points for the correct outcome.
     pub base: Option<i64>,
-    /// Points for an exact score.
+    /// Total reported on an exact score; it repeats `total`, it is not an
+    /// increment.
     pub exact: Option<i64>,
-    /// Extra points awarded by MPP.
+    /// Rarity bonus added on an exact score.
     pub extra: Option<i64>,
     /// Additional bonus points.
     pub bonus: Option<i64>,
     /// Total points reported by MPP, when present.
     pub total: Option<i64>,
-    /// Rarity label, when provided.
-    pub rarity_level: Option<String>,
 }
 
 /// MPP client abstraction used by the orchestrator and tests.
@@ -703,10 +702,6 @@ fn parse_history_points(points: Option<&Value>) -> Option<HistoryPoints> {
         extra: points.get("extra").and_then(parse_i64),
         bonus: points.get("bonus").and_then(parse_i64),
         total,
-        rarity_level: points
-            .get("rarityLevel")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
     })
 }
 
@@ -1042,11 +1037,11 @@ mod tests {
                             "awayScore": 0,
                             "points": {
                                 "base": 48,
-                                "exact": 30,
-                                "extra": 0,
+                                "exact": 78,
+                                "extra": 30,
                                 "bonus": 0,
                                 "total": 78,
-                                "rarityLevel": "rare"
+                                "rarityLevel": 3
                             },
                             "bonuses": { "doublePoints": 0 }
                         }
@@ -1084,7 +1079,8 @@ mod tests {
         let forecast = finished.forecast.as_ref().expect("forecast");
         assert_eq!(forecast.pick, Score { home: 2, away: 0 });
         assert_eq!(forecast.points.as_ref().expect("points").total, Some(78));
-        assert_eq!(forecast.points.as_ref().expect("points").exact, Some(30));
+        assert_eq!(forecast.points.as_ref().expect("points").exact, Some(78));
+        assert_eq!(forecast.points.as_ref().expect("points").extra, Some(30));
         assert!(!forecast.double_points);
 
         let postponed = &history.matches[0];
@@ -1164,7 +1160,8 @@ mod tests {
 
         assert_eq!(points.total, None);
         assert_eq!(points.base, Some(48));
-        assert_eq!(points.exact, Some(30));
+        assert_eq!(points.exact, Some(78));
+        assert_eq!(points.extra, Some(30));
     }
 
     #[test]

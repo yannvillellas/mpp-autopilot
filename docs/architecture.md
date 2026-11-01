@@ -217,7 +217,8 @@ For every finished match with a forecast, the bot stores one row in
 - the pick actually scored (MPP history wins over the local record);
 - the final score and MPP status;
 - the MPP points total and breakdown;
-- the points recomputed from the stored quotation and the 30-point exact bonus;
+- the points recomputed from the stored quotation, base only: the rarity bonus
+  is not modelled;
 - the source and the daily-snapshot quotation used by the model, when the
   local forecast is still available;
 - the modal score and the points it would have earned.
@@ -232,10 +233,12 @@ only matches absent from the snapshot, while `season_matches` survives. A
 finished match that is still listed keeps its write record instead of being
 recreated blank.
 
-MPP's `points.total` is authoritative. The bot recomputes `base + exact` from
-the stored quotation and the result; a difference larger than half a point is
-logged as a scoring-rule mismatch. `extra` and `bonus` are MPP additions the
-model does not price and are kept in the breakdown for analysis.
+MPP's `points.total` is authoritative. The bot recomputes the base from the
+stored quotation and the result and compares it with MPP's `base`; any
+difference is logged as a scoring mismatch, which means the stored quotation is
+not the one MPP scored with. `extra` and `bonus` are MPP additions the model
+does not price: the rarity bonus depends on the share of winners who picked the
+exact score, unknown before kickoff, so it is recorded for analysis only.
 
 `mpp-autopilot score` loads the state without applying the current mode (so a
 read-only report never resets triggers), refreshes up to
@@ -301,8 +304,8 @@ State is written atomically to `STATE_PATH` with a temporary file and rename.
       "away": "OL",
       "pick": { "home": 2, "away": 0 },
       "result": { "home": 2, "away": 0 },
-      "points": { "base": 48, "exact": 30, "total": 78 },
-      "computed_points": 78.0,
+      "points": { "base": 48, "exact": 78, "extra": 30, "total": 78 },
+      "computed_points": 48.0,
       "modal_points": 48.0,
       "source": "market",
       "odds": { "home": 48.0, "draw": 155.0, "away": 30.0 },

@@ -5,8 +5,8 @@ MPP Autopilot is a Rust service that predicts Ligue 1 exact scores for
 [The Odds API](https://the-odds-api.com) into expected goals, falls back to its
 own Elo ratings computed from
 [Football-Data](https://www.football-data.co.uk) Ligue 1 results, combines the
-probabilities with the MPP quotations, picks the score with the highest
-expected points, and writes it to the MPP `general` contest.
+probabilities with the MPP quotations, picks the most probable score of the
+most profitable outcome, and writes it to the MPP `general` contest.
 
 ## Quick start
 

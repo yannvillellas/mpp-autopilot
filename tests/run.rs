@@ -1074,11 +1074,10 @@ async fn history_result_is_merged_into_the_season_ledger() {
                 pick: Score { home: 2, away: 0 },
                 points: Some(HistoryPoints {
                     base: Some(48),
-                    exact: Some(30),
-                    extra: Some(0),
+                    exact: Some(78),
+                    extra: Some(30),
                     bonus: Some(0),
                     total: Some(78),
-                    rarity_level: None,
                 }),
                 double_points: false,
             }),
@@ -1097,7 +1096,7 @@ async fn history_result_is_merged_into_the_season_ledger() {
     assert_eq!(row.pick, Some(Score { home: 2, away: 0 }));
     assert_eq!(row.result, Some(Score { home: 2, away: 0 }));
     assert_eq!(row.points.as_ref().expect("points").total, Some(78));
-    assert_eq!(row.computed_points, Some(78.0));
+    assert_eq!(row.computed_points, Some(48.0));
     assert_eq!(row.modal_points, Some(scored_odds.home));
     assert_eq!(row.source, Some(ForecastOrigin::Market));
     assert_eq!(row.home, "club_psg");

@@ -998,38 +998,30 @@ fn points_record(points: &HistoryPoints) -> PointsRecord {
         extra: points.extra,
         bonus: points.bonus,
         total: points.total,
-        rarity_level: points.rarity_level.clone(),
     }
 }
 
-/// Compares the rule used by the model with MPP's own points breakdown.
+/// Compares the base points computed from the stored quotation with MPP's own.
 ///
-/// `extra` and `bonus` are MPP additions the model does not price, so the
-/// comparison uses `base + exact` when both are available and falls back to
-/// the total otherwise.
+/// The rarity bonus is not modelled, so the comparison uses `base` alone: the
+/// quotation of the result's outcome, which must match. A difference means the
+/// stored quotation is not the one MPP scored with.
 fn verify_points(row: &SeasonMatch) {
     let (Some(points), Some(computed)) = (&row.points, row.computed_points) else {
         return;
     };
-    let expected = points
-        .base
-        .zip(points.exact)
-        .map(|(base, exact)| base + exact)
-        .or(points.total);
-    let Some(expected) = expected else {
+    let Some(base) = points.base else {
         return;
     };
 
-    if (computed - expected as f64).abs() > 0.5 {
+    if (computed - base as f64).abs() > 0.01 {
         warn!(
             match_id = %row.match_id,
-            app_total = ?points.total,
+            mpp_base = base,
             computed,
-            base = ?points.base,
-            exact = ?points.exact,
+            odds = ?row.odds,
             extra = ?points.extra,
-            bonus = ?points.bonus,
-            "computed points differ from MPP scoring"
+            "computed base points differ from MPP scoring"
         );
     }
 }
@@ -1175,7 +1167,6 @@ fn log_trigger(
         modal = %prediction.modal,
         modal_probability = prediction.modal_probability,
         recommendation = ?prediction.recommendation,
-        recommendation_ev = prediction.recommendation_ev,
         remote = %remote,
         source = source.label(),
         observed_at = %source.observed_at(),

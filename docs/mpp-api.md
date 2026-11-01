@@ -84,8 +84,8 @@ Returns the forecasts registered for one match.
     "editedAt": "2026-10-23T18:30:00.000Z",
     "points": {
       "base": 9,
-      "exact": 3,
-      "extra": 0,
+      "exact": 12,
+      "extra": 3,
       "bonus": 0,
       "total": 12
     }
@@ -94,8 +94,12 @@ Returns the forecasts registered for one match.
 }
 ```
 
-The `points` object carries `base`, `exact`, `extra`, `bonus`, and `total`;
-the values above are illustrative.
+The `points` object carries `base`, `exact`, `extra`, `bonus`, and `total`.
+Observed values fix their meaning: `base` is the quotation of the outcome that
+happened, or zero for a wrong outcome; `extra` is the rarity bonus; `bonus` is
+the double-points contribution, zero outside a bonus league; `total` is what
+the app scores. `exact` repeats the total when the score was exact, so it is not
+an increment: on a real 2-0 scored 48 + 50 it reads 98 with a total of 98.
 
 Observed responses:
 
@@ -154,11 +158,11 @@ Response shape:
           "awayScore": 0,
           "points": {
             "base": 48,
-            "exact": 30,
-            "extra": 0,
+            "exact": 78,
+            "extra": 30,
             "bonus": 0,
             "total": 78,
-            "rarityLevel": "rare"
+            "rarityLevel": 3
           },
           "bonuses": { "doublePoints": 0 }
         }
@@ -176,11 +180,12 @@ finished match. `matchStatus` carries `postponed`, `abandoned`, `suspended` or
 `delayed`; the bot never scores those from a partial result.
 
 MPP returns the official points in `userForecast.points.total`; the bot stores
-this total and also recomputes `base + exact` from the quotations and the 30
-bonus. The two values are compared and a mismatch is logged, so the scoring
-rule is verified against the app instead of trusted blindly. The bot reads one
-page per daily pass and can walk up to
-`MAX_REPORT_HISTORY_PAGES` (30 days) from the `score` command.
+this total and also recomputes the base from the quotations, comparing it with
+MPP's `base`. A difference is logged, so the base rule is verified against the
+app instead of trusted blindly. The rarity bonus in `extra` is recorded but not
+predicted: it depends on how many of the winners picked the exact score, which
+is only known after kickoff. The bot reads one page per daily pass and can walk
+up to `MAX_REPORT_HISTORY_PAGES` (30 days) from the `score` command.
 
 ### `PATCH /user-match-forecasts/entity/general/match/{matchId}`
 

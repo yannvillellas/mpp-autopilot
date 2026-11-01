@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::elo::EloRatings;
-use crate::model::{Lambdas, Odds, Score};
+use crate::model::{self, Lambdas, Odds, Score};
 
 /// Execution mode persisted with the state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,10 +89,11 @@ pub struct PointsRecord {
     /// Base points for the correct outcome.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<i64>,
-    /// Points for an exact score.
+    /// Total reported on an exact score; it repeats `total`, it is not an
+    /// increment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exact: Option<i64>,
-    /// Extra points awarded by MPP.
+    /// Rarity bonus added on an exact score.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra: Option<i64>,
     /// Additional bonus points.
@@ -101,9 +102,6 @@ pub struct PointsRecord {
     /// Total points reported by MPP, when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total: Option<i64>,
-    /// Rarity label, when provided.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rarity_level: Option<String>,
 }
 
 /// One match in the season ledger, scored or still waiting for a result.
@@ -296,9 +294,25 @@ impl State {
     /// triggers when the configured mode differs from the persisted one.
     pub fn load_unmodified(path: &Path) -> Result<Self, StateError> {
         match fs::read_to_string(path) {
-            Ok(contents) => Ok(serde_json::from_str(&contents)?),
+            Ok(contents) => {
+                let mut state: Self = serde_json::from_str(&contents)?;
+                state.recompute_derived_points();
+                Ok(state)
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Self::new(Mode::Dry)),
             Err(error) => Err(StateError::Io(error)),
+        }
+    }
+
+    /// Recomputes the points derived from the persisted ledger inputs.
+    ///
+    /// The exact-score bonus left the model, so rows written before that change
+    /// hold values under the old rule. Every input is persisted, so the derived
+    /// values can be rebuilt on load without a state version.
+    fn recompute_derived_points(&mut self) {
+        for row in self.season_matches.values_mut() {
+            row.computed_points = derived_points(row.pick, row.result, row.odds);
+            row.modal_points = derived_points(row.modal, row.result, row.odds);
         }
     }
 
@@ -361,6 +375,11 @@ impl State {
             }
         }
     }
+}
+
+/// Recomputes points from the persisted pick, result and quotation.
+fn derived_points(pick: Option<Score>, result: Option<Score>, odds: Option<Odds>) -> Option<f64> {
+    Some(model::points(pick?, result?, odds?))
 }
 
 /// Last successfully fetched Elo ratings.

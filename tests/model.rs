@@ -2,6 +2,7 @@
 
 use mpp_autopilot::model::{
     Lambdas, ModelError, Odds, Outcome, Score, lambdas, points, predict, predict_from_lambdas,
+    score_matrix,
 };
 
 const TOLERANCE: f64 = 5e-4;
@@ -28,7 +29,7 @@ fn reference_case_matches_expected_values() {
     assert_close(prediction.lambdas.away, 1.3481, TOLERANCE);
 
     assert_eq!(prediction.pick, Score { home: 1, away: 2 });
-    assert_close(prediction.pick_ev, 40.78, 0.05);
+    assert_close(prediction.pick_ev, 38.35, 0.05);
     assert_close(prediction.pick_probability, 0.0812, TOLERANCE);
 
     assert_eq!(prediction.recommendation, Outcome::Away);
@@ -62,10 +63,51 @@ fn outcome_probabilities_are_normalized() {
 
     let total = prediction.outcomes.home + prediction.outcomes.draw + prediction.outcomes.away;
     assert_close(total, 1.0, 1e-12);
+}
 
-    let outcome = Outcome::from_score(prediction.pick);
-    let expected_ev = prediction.outcomes.for_outcome(outcome) * odds.for_outcome(outcome)
-        + prediction.pick_probability * 30.0;
+#[test]
+fn pick_is_the_most_probable_score_of_the_recommended_outcome() {
+    let odds = Odds {
+        home: 81.0,
+        draw: 117.0,
+        away: 112.0,
+    };
+    let prediction = predict(1684.0983240112262, 1670.9520303480226, odds)
+        .expect("the reference inputs are valid");
+    let matrix = score_matrix(prediction.lambdas).expect("score matrix");
+
+    assert_eq!(
+        Outcome::from_score(prediction.pick),
+        prediction.recommendation
+    );
+    assert_eq!(prediction.pick, Score { home: 1, away: 2 });
+    assert_eq!(prediction.modal, Score { home: 1, away: 1 });
+    assert_ne!(prediction.pick, prediction.modal);
+
+    let best_in_outcome = matrix
+        .iter()
+        .enumerate()
+        .flat_map(|(home, row)| {
+            row.iter().enumerate().map(move |(away, &probability)| {
+                (
+                    Score {
+                        home: home as u8,
+                        away: away as u8,
+                    },
+                    probability,
+                )
+            })
+        })
+        .filter(|(score, _)| Outcome::from_score(*score) == prediction.recommendation)
+        .map(|(_, probability)| probability)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let pick_probability =
+        matrix[usize::from(prediction.pick.home)][usize::from(prediction.pick.away)];
+    assert_close(pick_probability, best_in_outcome, 1e-12);
+    assert_close(prediction.pick_probability, pick_probability, 1e-12);
+
+    let expected_ev = prediction.outcomes.for_outcome(prediction.recommendation)
+        * odds.for_outcome(prediction.recommendation);
     assert_close(prediction.pick_ev, expected_ev, 1e-9);
 }
 
@@ -79,7 +121,7 @@ fn points_use_the_quotation_of_the_final_outcome() {
 
     assert_close(
         points(Score { home: 2, away: 0 }, Score { home: 2, away: 0 }, odds),
-        78.0,
+        48.0,
         1e-12,
     );
     assert_close(

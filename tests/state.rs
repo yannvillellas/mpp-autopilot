@@ -99,6 +99,25 @@ fn state_roundtrips_through_atomic_file() {
 }
 
 #[test]
+fn loading_recomputes_points_derived_under_the_old_bonus_rule() {
+    let dir = TestDir::new();
+    let path = dir.state_path();
+    let mut state = State::new(Mode::Dry);
+    let mut row = season_match(at(26, 18));
+    row.computed_points = Some(78.0);
+    row.modal_points = Some(78.0);
+    state.season_matches.insert("match-1".to_owned(), row);
+    state.save(&path).expect("save state");
+
+    let loaded = State::load_unmodified(&path).expect("load state");
+    let row = &loaded.season_matches["match-1"];
+
+    assert_eq!(row.computed_points, Some(48.0));
+    assert_eq!(row.modal_points, Some(48.0));
+    assert_eq!(row.points.as_ref().expect("points").base, Some(48));
+}
+
+#[test]
 fn elo_cache_roundtrips_through_the_state_file() {
     let dir = TestDir::new();
     let path = dir.state_path();
@@ -349,13 +368,12 @@ fn season_match(kickoff: DateTime<Utc>) -> SeasonMatch {
         result: Some(Score { home: 2, away: 0 }),
         points: Some(PointsRecord {
             base: Some(48),
-            exact: Some(30),
-            extra: Some(0),
+            exact: Some(78),
+            extra: Some(30),
             bonus: Some(0),
             total: Some(78),
-            rarity_level: Some("rare".to_owned()),
         }),
-        computed_points: Some(78.0),
+        computed_points: Some(48.0),
         modal_points: Some(48.0),
         source: Some(ForecastOrigin::Market),
         odds: Some(Odds {

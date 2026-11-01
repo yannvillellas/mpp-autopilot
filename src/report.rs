@@ -168,13 +168,12 @@ mod tests {
             result: Some(Score { home: 2, away: 0 }),
             points: Some(PointsRecord {
                 base: Some(48),
-                exact: Some(30),
-                extra: Some(0),
+                exact: Some(78),
+                extra: Some(30),
                 bonus: Some(0),
                 total: Some(78),
-                rarity_level: None,
             }),
-            computed_points: Some(78.0),
+            computed_points: Some(48.0),
             modal_points: Some(48.0),
             source: Some(ForecastOrigin::Market),
             odds: Some(Odds {
@@ -243,7 +242,7 @@ mod tests {
 
         let report = score_report(&state);
 
-        assert!(report.contains("~78"));
+        assert!(report.contains("~48"));
         assert!(report.contains("estimated for 1 match(es)"));
     }
 
