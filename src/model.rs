@@ -1,9 +1,10 @@
 //! Expected-points model for exact-score predictions.
 //!
 //! Goal counts follow independent Poisson distributions adjusted with the
-//! Dixon-Coles low-score correction. Each exact score is valued with the
-//! probability of its outcome multiplied by the MPP quotation. The rarity bonus
-//! is not priced because it cannot be known before kickoff.
+//! Dixon-Coles low-score correction. The recommendation is the outcome with the
+//! lowest quotation: the market is the only probability estimate worth
+//! trusting. The pick is the most probable exact score of that outcome. The
+//! rarity bonus is not priced because it cannot be known before kickoff.
 
 use std::fmt;
 
@@ -163,7 +164,7 @@ pub struct Prediction {
     pub modal: Score,
     /// Probability of [`Self::modal`].
     pub modal_probability: f64,
-    /// Outcome with the highest expected points.
+    /// Outcome with the lowest quotation.
     pub recommendation: Outcome,
 }
 
@@ -246,6 +247,9 @@ fn validate_lambdas(lambdas: Lambdas) -> Result<(), ModelError> {
     }
 }
 
+/// Builds the prediction from expected goals and quotations.
+///
+/// The recommendation is the outcome with the lowest quotation.
 fn build_prediction(lambdas: Lambdas, odds: Odds) -> Result<Prediction, ModelError> {
     let matrix = score_matrix(lambdas)?;
     let outcomes = outcome_probabilities(&matrix);
@@ -265,19 +269,18 @@ fn build_prediction(lambdas: Lambdas, odds: Odds) -> Result<Prediction, ModelErr
         }
     }
 
-    let mut recommendation = Outcome::Home;
-    let mut recommendation_ev = f64::NEG_INFINITY;
-    for outcome in [Outcome::Home, Outcome::Draw, Outcome::Away] {
-        let ev = outcomes.for_outcome(outcome) * odds.for_outcome(outcome);
-        if ev > recommendation_ev {
-            recommendation = outcome;
-            recommendation_ev = ev;
-        }
-    }
+    // The market is the only probability estimate worth trusting, and the
+    // cheapest outcome is the one it judges most likely. The exact-score
+    // bonus plays no part: it is unknown before kickoff and worth little
+    // beside the quotation.
+    let recommendation = [Outcome::Home, Outcome::Draw, Outcome::Away]
+        .into_iter()
+        .min_by(|a, b| odds.for_outcome(*a).total_cmp(&odds.for_outcome(*b)))
+        .expect("three outcomes");
 
     // The rarity bonus depends on how rare the score turns out to be among the
     // winners, which is unknown before kickoff, so it is not priced: within the
-    // most profitable outcome the pick is the most probable score.
+    // recommended outcome the pick is the most probable score.
     let mut pick = Score { home: 0, away: 0 };
     let mut pick_probability = 0.0;
     for (home, row) in matrix.iter().enumerate() {
@@ -297,7 +300,7 @@ fn build_prediction(lambdas: Lambdas, odds: Odds) -> Result<Prediction, ModelErr
         lambdas,
         outcomes,
         pick,
-        pick_ev: recommendation_ev,
+        pick_ev: outcomes.for_outcome(recommendation) * odds.for_outcome(recommendation),
         pick_probability,
         modal,
         modal_probability,

@@ -399,18 +399,18 @@ async fn write_mode_writes_publish_and_persists() {
     assert_eq!(report.skipped, 0);
     assert_eq!(
         mpp.writes(),
-        vec![("match-1".to_owned(), Score { home: 1, away: 2 })]
+        vec![("match-1".to_owned(), Score { home: 2, away: 1 })]
     );
 
     let saved = &runner.state().matches["match-1"];
     assert!(saved.is_trigger_done(Trigger::Publish));
-    assert_eq!(saved.written_score(), Some("1-2"));
+    assert_eq!(saved.written_score(), Some("2-1"));
     assert_eq!(saved.last_written_at, Some(now()));
     assert_eq!(elo.calls(), 1);
     assert_eq!(mpp.reads(), 1);
 
     let loaded = State::load(&path, Mode::Write).expect("load state");
-    assert_eq!(loaded.matches["match-1"].written_score(), Some("1-2"));
+    assert_eq!(loaded.matches["match-1"].written_score(), Some("2-1"));
     assert!(loaded.matches["match-1"].is_trigger_done(Trigger::Publish));
 }
 
@@ -454,7 +454,7 @@ async fn matching_remote_forecast_is_not_rewritten() {
         .record_trigger(Trigger::Publish, now());
 
     let mpp = FakeMpp::new(snapshot(kickoff()));
-    mpp.preset_forecast("match-1", Score { home: 1, away: 2 });
+    mpp.preset_forecast("match-1", Score { home: 2, away: 1 });
     let elo = FakeElo::new(ratings());
     let dir = TestDir::new();
     let path = dir.path().join("state.json");
@@ -502,7 +502,7 @@ async fn manual_forecast_edit_is_overwritten() {
     assert_eq!(mpp.reads(), 1);
     assert_eq!(
         mpp.writes(),
-        vec![("match-1".to_owned(), Score { home: 1, away: 2 })]
+        vec![("match-1".to_owned(), Score { home: 2, away: 1 })]
     );
     assert!(runner.state().matches["match-1"].is_trigger_done(Trigger::T60));
 }
@@ -531,7 +531,7 @@ async fn read_failures_still_write() {
         assert_eq!(mpp.reads(), 1, "status {status}");
         assert_eq!(
             mpp.writes(),
-            vec![("match-1".to_owned(), Score { home: 1, away: 2 })],
+            vec![("match-1".to_owned(), Score { home: 2, away: 1 })],
             "status {status}"
         );
         assert!(
@@ -736,7 +736,7 @@ async fn t60_and_t5_due_together_write_once() {
     let saved = &runner.state().matches["match-1"];
     assert!(saved.is_trigger_done(Trigger::T60));
     assert!(saved.is_trigger_done(Trigger::T5));
-    assert_eq!(saved.written_score(), Some("1-2"));
+    assert_eq!(saved.written_score(), Some("2-1"));
 }
 
 #[tokio::test]
@@ -899,7 +899,7 @@ async fn missing_fixture_does_not_block_other_matches() {
     assert_eq!(elo.calls(), 1);
     assert_eq!(
         mpp.writes(),
-        vec![("match-1".to_owned(), Score { home: 1, away: 2 })]
+        vec![("match-1".to_owned(), Score { home: 2, away: 1 })]
     );
     assert!(runner.state().matches["match-1"].is_trigger_done(Trigger::Publish));
     assert!(!runner.state().matches.contains_key("stale-match"));
@@ -932,7 +932,7 @@ async fn transient_write_failure_does_not_block_other_matches() {
     assert!(matches!(error, RunError::Mpp(_)));
     assert_eq!(
         mpp.writes(),
-        vec![("match-2".to_owned(), Score { home: 1, away: 2 })]
+        vec![("match-2".to_owned(), Score { home: 2, away: 1 })]
     );
     assert!(!runner.state().matches["match-1"].is_trigger_done(Trigger::Publish));
     assert!(runner.state().matches["match-2"].is_trigger_done(Trigger::Publish));
@@ -1212,7 +1212,7 @@ async fn elo_fetch_failure_uses_the_last_successful_ratings() {
     assert_eq!(elo.calls(), 1);
     assert_eq!(
         mpp.writes(),
-        vec![("match-1".to_owned(), Score { home: 1, away: 2 })]
+        vec![("match-1".to_owned(), Score { home: 2, away: 1 })]
     );
     assert!(runner.state().matches["match-1"].is_trigger_done(Trigger::Publish));
 
