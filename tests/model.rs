@@ -28,11 +28,11 @@ fn reference_case_matches_expected_values() {
     assert_close(prediction.lambdas.home, 1.4178, TOLERANCE);
     assert_close(prediction.lambdas.away, 1.3481, TOLERANCE);
 
-    assert_eq!(prediction.pick, Score { home: 1, away: 2 });
-    assert_close(prediction.pick_ev, 38.35, 0.05);
-    assert_close(prediction.pick_probability, 0.0812, TOLERANCE);
+    assert_eq!(prediction.pick, Score { home: 2, away: 1 });
+    assert_close(prediction.pick_ev, 30.295102, TOLERANCE);
+    assert_close(prediction.pick_probability, 0.085352, TOLERANCE);
 
-    assert_eq!(prediction.recommendation, Outcome::Away);
+    assert_eq!(prediction.recommendation, Outcome::Home);
 }
 
 #[test]
@@ -80,7 +80,7 @@ fn pick_is_the_most_probable_score_of_the_recommended_outcome() {
         Outcome::from_score(prediction.pick),
         prediction.recommendation
     );
-    assert_eq!(prediction.pick, Score { home: 1, away: 2 });
+    assert_eq!(prediction.pick, Score { home: 2, away: 1 });
     assert_eq!(prediction.modal, Score { home: 1, away: 1 });
     assert_ne!(prediction.pick, prediction.modal);
 
@@ -109,6 +109,57 @@ fn pick_is_the_most_probable_score_of_the_recommended_outcome() {
     let expected_ev = prediction.outcomes.for_outcome(prediction.recommendation)
         * odds.for_outcome(prediction.recommendation);
     assert_close(prediction.pick_ev, expected_ev, 1e-9);
+}
+
+#[test]
+fn recommendation_follows_the_lowest_quotation() {
+    let expected_lambdas =
+        lambdas(1684.0983240112262, 1670.9520303480226).expect("valid reference ratings");
+    let cases = [
+        (
+            Odds {
+                home: 81.0,
+                draw: 82.0,
+                away: 83.0,
+            },
+            Outcome::Home,
+        ),
+        (
+            Odds {
+                home: 83.0,
+                draw: 81.0,
+                away: 82.0,
+            },
+            Outcome::Draw,
+        ),
+        (
+            Odds {
+                home: 83.0,
+                draw: 82.0,
+                away: 81.0,
+            },
+            Outcome::Away,
+        ),
+        (
+            Odds {
+                home: 81.0,
+                draw: 117.0,
+                away: 112.0,
+            },
+            Outcome::Home,
+        ),
+    ];
+
+    for (odds, expected) in cases {
+        let prediction = predict_from_lambdas(expected_lambdas, odds).expect("valid prediction");
+        let cheapest = [Outcome::Home, Outcome::Draw, Outcome::Away]
+            .into_iter()
+            .min_by(|a, b| odds.for_outcome(*a).total_cmp(&odds.for_outcome(*b)))
+            .expect("three outcomes");
+
+        assert_eq!(prediction.recommendation, expected);
+        assert_eq!(prediction.recommendation, cheapest);
+    }
 }
 
 #[test]
