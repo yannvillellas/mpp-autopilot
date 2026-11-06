@@ -27,8 +27,8 @@ pub fn score_report(state: &State) -> String {
     let mut output = String::new();
     let _ = writeln!(
         output,
-        "{:<10} {:<30} {:>5} {:>9} {:>7} {:>8} {:>5} {:>10}",
-        "date", "fixture", "pick", "result", "points", "computed", "modal", "source"
+        "{:<10} {:<30} {:>5} {:>9} {:>7} {:>8} {:>5} {:>10} {:>10}",
+        "date", "fixture", "pick", "result", "points", "computed", "modal", "odds", "source"
     );
 
     let mut totals: BTreeMap<u16, SeasonTotals> = BTreeMap::new();
@@ -79,11 +79,15 @@ pub fn score_report(state: &State) -> String {
             .modal
             .map(|score| score.to_string())
             .unwrap_or_else(|| "-".to_owned());
+        let odds = row
+            .odds
+            .map(|odds| format!("{:.0}/{:.0}/{:.0}", odds.home, odds.draw, odds.away))
+            .unwrap_or_else(|| "-".to_owned());
         let source = source_label(row.source);
 
         let _ = writeln!(
             output,
-            "{date:<10} {fixture:<30} {pick:>5} {result:>9} {points_text:>7} {computed:>8} {modal:>5} {source:>10}"
+            "{date:<10} {fixture:<30} {pick:>5} {result:>9} {points_text:>7} {computed:>8} {modal:>5} {odds:>10} {source:>10}"
         );
     }
 
@@ -215,6 +219,48 @@ mod tests {
         assert!(report.contains("season 2026/27: 78 points from 1 match(es)"));
         assert!(report.contains("pending: 1 match(es) without a result"));
         assert!(report.contains("postponed"));
+    }
+
+    #[test]
+    fn report_prints_the_quotations_of_each_match() {
+        let mut row = played_match();
+        row.odds = Some(Odds {
+            home: 81.0,
+            draw: 117.0,
+            away: 112.0,
+        });
+
+        let mut state = State::new(Mode::Write);
+        state.season_matches.insert("match-1".to_owned(), row);
+
+        let report = score_report(&state);
+        let line = report
+            .lines()
+            .find(|line| line.contains("Paris SG - OL"))
+            .expect("match row");
+        let cells: Vec<&str> = line.split_whitespace().collect();
+
+        assert!(report.lines().next().expect("header").contains("odds"));
+        assert_eq!(cells[cells.len() - 2], "81/117/112");
+    }
+
+    #[test]
+    fn report_marks_missing_quotations() {
+        let mut row = played_match();
+        row.odds = None;
+
+        let mut state = State::new(Mode::Write);
+        state.season_matches.insert("match-1".to_owned(), row);
+
+        let report = score_report(&state);
+        let line = report
+            .lines()
+            .find(|line| line.contains("Paris SG - OL"))
+            .expect("match row");
+        let cells: Vec<&str> = line.split_whitespace().collect();
+
+        assert_eq!(cells[cells.len() - 2], "-");
+        assert_eq!(cells[cells.len() - 1], "market");
     }
 
     #[test]
