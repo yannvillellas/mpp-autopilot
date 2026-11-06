@@ -102,9 +102,11 @@ lambda_home = total * share
 lambda_away = total * (1 - share)
 ```
 
-The resulting lambdas feed the existing expected-points model unchanged. Its
-Dixon-Coles adjustment and MPP quotation layer are identical for market and
-Elo inputs.
+The resulting lambdas feed the score model unchanged: they give the probability
+matrix whose most probable score becomes the pick. The outcome itself is not
+chosen from those probabilities but from the quotations — the lowest one wins,
+because the market is the only probability estimate worth trusting. The
+Dixon-Coles adjustment is identical for market and Elo inputs.
 
 ## Elo ratings
 

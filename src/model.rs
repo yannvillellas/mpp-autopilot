@@ -1,4 +1,4 @@
-//! Expected-points model for exact-score predictions.
+//! Exact-score model for MPP predictions.
 //!
 //! Goal counts follow independent Poisson distributions adjusted with the
 //! Dixon-Coles low-score correction. The recommendation is the outcome with the
@@ -214,7 +214,7 @@ pub fn lambdas(elo_home: f64, elo_away: f64) -> Result<Lambdas, ModelError> {
     }
 }
 
-/// Computes the expected-points model for one fixture from Elo ratings.
+/// Computes the prediction for one fixture from Elo ratings.
 ///
 /// Ties are resolved in favour of the first score in row-major order
 /// (home goals, then away goals) and, for the recommendation, in the order
@@ -225,7 +225,7 @@ pub fn predict(elo_home: f64, elo_away: f64, odds: Odds) -> Result<Prediction, M
     build_prediction(lambdas, odds)
 }
 
-/// Computes the expected-points model for one fixture from expected goals.
+/// Computes the prediction for one fixture from expected goals.
 ///
 /// This is the same scoring model as [`predict`], for sources that produce
 /// expected goals directly, such as market odds.

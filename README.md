@@ -4,9 +4,9 @@ MPP Autopilot is a Rust service that predicts Ligue 1 exact scores for
 [Mon Petit Prono](https://mpp.football). It converts market odds from
 [The Odds API](https://the-odds-api.com) into expected goals, falls back to its
 own Elo ratings computed from
-[Football-Data](https://www.football-data.co.uk) Ligue 1 results, combines the
-probabilities with the MPP quotations, picks the most probable score of the
-most profitable outcome, and writes it to the MPP `general` contest.
+[Football-Data](https://www.football-data.co.uk) Ligue 1 results. It picks the
+outcome with the lowest quotation, takes its most probable exact score, and
+writes it to the MPP `general` contest.
 
 ## Quick start
 
@@ -54,9 +54,9 @@ never influence a forecast, a trigger or a write.
 
 `mpp-autopilot score` loads the ledger without changing the service mode,
 refreshes up to 30 days of history, and prints one line per match with the
-recorded most probable score and the season total. A match without a result is
-printed with its MPP status (`postponed`, `delayed`, ...) instead of being
-silently omitted.
+quotation used, the most probable score and the season total. A match without a
+result is printed with its MPP status (`postponed`, `delayed`, ...) instead of
+being silently omitted.
 
 ## Commands
 
